@@ -1,4 +1,5 @@
 # Local-only generated dependencies and machine settings
 node_modules/
+.vercel/
 android/local.properties
 .DS_Store

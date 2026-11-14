@@ -164,9 +164,8 @@
 }
 
 .screen-content {
-  animation: screen-arrive 420ms var(--motion-spring) both;
+  min-width: 0;
   transform-origin: 50% 0;
-  will-change: transform, opacity;
 }
 
 .screen-content button,
@@ -256,7 +255,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .screen-content,
   .screen-content button,
   .screen-content [role="button"],
   .tab-bar button {
@@ -285,16 +283,5 @@
   .glass,
   .sheet-panel {
     border: 1px solid var(--separator);
-  }
-}
-
-@keyframes screen-arrive {
-  from {
-    opacity: 0;
-    transform: translateY(8px) scale(0.995);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
   }
 }

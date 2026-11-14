@@ -670,6 +670,22 @@ function mergeCategories(categories: Category[]) {
 }
 
 let subscribed = false;
+let persistTimer: number | undefined;
+let pendingPersist: string | null = null;
+
+function flushPersist() {
+  if (typeof localStorage === "undefined" || pendingPersist === null) return;
+  if (persistTimer !== undefined) window.clearTimeout(persistTimer);
+  persistTimer = undefined;
+  localStorage.setItem(KEY, pendingPersist);
+  pendingPersist = null;
+}
+
+function schedulePersist(state: Data) {
+  pendingPersist = JSON.stringify(pick(state));
+  if (persistTimer !== undefined) return;
+  persistTimer = window.setTimeout(flushPersist, 120);
+}
 
 export function hydrateFinance() {
   if (subscribed || typeof localStorage === "undefined") return;
@@ -682,9 +698,8 @@ export function hydrateFinance() {
   } catch {
     /* keep seed */
   }
-  useFinance.subscribe((s) => {
-    localStorage.setItem(KEY, JSON.stringify(pick(s)));
-  });
+  useFinance.subscribe((s) => schedulePersist(s));
+  window.addEventListener("pagehide", flushPersist);
   subscribed = true;
   if (!localStorage.getItem(KEY)) {
     localStorage.setItem(KEY, JSON.stringify(pick(useFinance.getState())));

@@ -14,6 +14,8 @@ export default tseslint.config(
       ".vercel/**",
       ".nitro/**",
       "node_modules/**",
+      "android/app/src/main/assets/public/**",
+      "android/app/build/**",
       "src/routeTree.gen.ts",
     ],
   },

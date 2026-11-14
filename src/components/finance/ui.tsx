@@ -42,8 +42,22 @@ export function Section({
   children: ReactNode;
   className?: string;
 }) {
+  const section = useRef<HTMLElement>(null);
+
+  useGSAP(() => {
+    if (!section.current || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    gsap.fromTo(section.current, { autoAlpha: 0, y: 8 }, {
+      autoAlpha: 1,
+      y: 0,
+      duration: 0.28,
+      ease: "power2.out",
+      overwrite: "auto",
+      clearProps: "opacity,visibility,transform",
+    });
+  }, { scope: section });
+
   return (
-    <section className={cn("mt-6", className)}>
+    <section ref={section} className={cn("mt-6", className)}>
       {title ? <h2 className="px-8 pb-2 text-foot text-label-2">{title}</h2> : null}
       {children}
       {footer ? <p className="px-8 pt-2 text-foot text-label-2">{footer}</p> : null}
@@ -58,9 +72,24 @@ export function Group({
   children: ReactNode;
   sep?: "text" | "icon" | "none";
 }) {
+  const group = useRef<HTMLDivElement>(null);
   const items = (Array.isArray(children) ? children : [children]).filter(Boolean);
+
+  useGSAP(() => {
+    if (!group.current || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    gsap.fromTo(Array.from(group.current.children), { autoAlpha: 0, y: 5 }, {
+      autoAlpha: 1,
+      y: 0,
+      duration: 0.22,
+      stagger: { each: 0.025, amount: 0.18 },
+      ease: "power2.out",
+      overwrite: "auto",
+      clearProps: "opacity,visibility,transform",
+    });
+  }, { scope: group });
+
   return (
-    <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+    <div ref={group} className="mx-4 overflow-hidden rounded-cell bg-cell">
       {items.map((child, i) => (
         <div key={i}>
           {i > 0 && sep !== "none" ? <div className={sep === "icon" ? "row-sep-icon" : "row-sep"} /> : null}

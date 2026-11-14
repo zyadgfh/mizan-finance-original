@@ -99,7 +99,7 @@ export function createDriveSyncController(adapter: DriveSyncAdapter): DriveSyncC
       }
 
       if (!remote) {
-        const written = await adapter.write({
+        await adapter.write({
           version: SYNC_VERSION,
           updatedAt: localUpdatedAt,
           deviceId: "current-device",
