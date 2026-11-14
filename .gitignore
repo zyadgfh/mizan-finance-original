@@ -6,4 +6,5 @@ dist/
 .nitro/
 .vercel/
 android/local.properties
+*.apk
 .DS_Store

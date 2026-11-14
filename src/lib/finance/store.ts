@@ -815,6 +815,36 @@ export function hydrateFinance() {
 }
 
 function download(blob: Blob, filename: string) {
+  const nativeBridge = (
+    window as Window & {
+      MizanNative?: { shareFile?: (name: string, mimeType: string, content: string) => boolean };
+    }
+  ).MizanNative;
+
+  if (nativeBridge?.shareFile) {
+    void blob.text().then((content) => {
+      const ok = nativeBridge.shareFile?.(filename, blob.type || "application/octet-stream", content);
+      if (ok) return;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+    });
+    return;
+  }
+
+  const nav = typeof navigator !== "undefined" ? navigator : undefined;
+  if (nav && typeof nav.share === "function" && typeof nav.canShare === "function" && /Android/i.test(nav.userAgent)) {
+    const file = new File([blob], filename, { type: blob.type || "application/octet-stream" });
+    if (nav.canShare({ files: [file] })) {
+      void nav.share({ files: [file], title: filename }).catch(() => undefined);
+      return;
+    }
+  }
+
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = filename;

@@ -85,6 +85,32 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const win = window as Window & { __mizanBack?: () => boolean };
+    win.__mizanBack = () => {
+      if (sheet) {
+        setSheet(null);
+        return true;
+      }
+      if (stack.length > 1) {
+        setStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : [{ name: "main" }]));
+        setCompact(false);
+        return true;
+      }
+      if (tab !== "home") {
+        setTabState("home");
+        setStack([{ name: "main" }]);
+        setQuery("");
+        setCompact(false);
+        return true;
+      }
+      return false;
+    };
+    return () => {
+      delete win.__mizanBack;
+    };
+  }, [sheet, stack.length, tab]);
+
+  useEffect(() => {
     hydrateFinance();
     void scheduleAllTaskNotifications();
   }, []);

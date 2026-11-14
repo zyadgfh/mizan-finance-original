@@ -1,0 +1,55 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "arena/**"
+
+permissions:
+  contents: read
+
+jobs:
+  android-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify TypeScript, lint, and tests
+        run: npm run typecheck && npm run lint && npm test
+
+      - name: Build native bundle and sync Capacitor Android
+        run: npm run cap:sync
+
+      - name: Build Android Debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Stage APK artifact
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk mizan-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mizan-debug-apk
+          path: mizan-debug.apk
+          if-no-files-found: error
+          retention-days: 30
