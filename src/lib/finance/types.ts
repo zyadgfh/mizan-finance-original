@@ -145,6 +145,7 @@ export type Data = {
   budgets: Budget[];
   openingBalance: number;
   currency: Currency;
+  phoneCountryCode?: string;
   demo: boolean;
   wallets: Wallet[];
   transfers: Transfer[];

@@ -1,6 +1,10 @@
 const DB = "mizan-receipts";
 const STORE = "files";
 
+function hasIndexedDb() {
+  return typeof indexedDB !== "undefined";
+}
+
 function openDb() {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const req = indexedDB.open(DB, 1);
@@ -13,6 +17,7 @@ function openDb() {
 }
 
 export async function saveReceipt(id: string, blob: Blob) {
+  if (!hasIndexedDb()) return;
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, "readwrite");
@@ -24,6 +29,7 @@ export async function saveReceipt(id: string, blob: Blob) {
 }
 
 export async function loadReceipt(id: string) {
+  if (!hasIndexedDb()) return undefined;
   const db = await openDb();
   const blob = await new Promise<Blob | undefined>((resolve, reject) => {
     const tx = db.transaction(STORE, "readonly");
@@ -36,7 +42,7 @@ export async function loadReceipt(id: string) {
 }
 
 export async function deleteReceipt(id: string) {
-  if (typeof indexedDB === "undefined") return;
+  if (!hasIndexedDb()) return;
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, "readwrite");
@@ -48,11 +54,73 @@ export async function deleteReceipt(id: string) {
 }
 
 export async function clearReceipts() {
-  if (typeof indexedDB === "undefined") return;
+  if (!hasIndexedDb()) return;
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function dataUrlToBlob(dataUrl: string): Blob | null {
+  const match = /^data:([^;,]+);base64,(.+)$/.exec(dataUrl);
+  if (!match) return null;
+  const mime = match[1] || "image/jpeg";
+  const binary = atob(match[2]);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+export async function exportAllReceipts(): Promise<Record<string, string>> {
+  if (!hasIndexedDb()) return {};
+  const db = await openDb();
+  const entries = await new Promise<Array<[string, Blob]>>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const store = tx.objectStore(STORE);
+    const keysReq = store.getAllKeys();
+    const valsReq = store.getAll();
+    tx.oncomplete = () => {
+      const keys = (keysReq.result ?? []).map(String);
+      const vals = (valsReq.result ?? []) as Blob[];
+      resolve(keys.map((k, i) => [k, vals[i]]).filter((pair): pair is [string, Blob] => Boolean(pair[1])));
+    };
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+
+  const out: Record<string, string> = {};
+  for (const [id, blob] of entries) {
+    out[id] = await blobToDataUrl(blob);
+  }
+  return out;
+}
+
+export async function importAllReceipts(receipts: Record<string, string>) {
+  if (!hasIndexedDb()) return;
+  await clearReceipts();
+  const entries = Object.entries(receipts).filter(([, v]) => typeof v === "string" && v.startsWith("data:"));
+  if (entries.length === 0) return;
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    for (const [id, dataUrl] of entries) {
+      const blob = dataUrlToBlob(dataUrl);
+      if (blob) store.put(blob, id);
+    }
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

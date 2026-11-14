@@ -1,11 +1,28 @@
 import { ChevronRight, Ellipsis, House, Scale, Users, Wallet } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { Toaster } from "sonner";
 import { MizanContext, type Route, type SheetState, type Tab } from "@/components/finance/context";
-import { GoalForm, GoalMoveForm, PinForm, RecurringForm, SplitForm, TransferForm, WalletForm } from "@/components/finance/feature-forms";
-import { GoalScreen, GoalsScreen, LockScreen, RecurringScreen, ReportScreen, WalletsScreen } from "@/components/finance/features";
-import { NotificationsScreen } from "@/components/finance/notifications-screen";
+import { DriveSyncScreen } from "@/components/finance/drive-sync-screen";
+import {
+  GoalForm,
+  GoalMoveForm,
+  PinForm,
+  RecurringForm,
+  SplitForm,
+  TransferForm,
+  WalletForm,
+} from "@/components/finance/feature-forms";
+import {
+  GoalScreen,
+  GoalsScreen,
+  LockScreen,
+  RecurringScreen,
+  ReportScreen,
+  WalletsScreen,
+} from "@/components/finance/features";
 import { DebtForm, PayForm, PersonForm, ResetForm, TxnForm } from "@/components/finance/forms";
+import { MotionScreen } from "@/components/finance/gsap-motion";
+import { NotificationsScreen } from "@/components/finance/notifications-screen";
 import {
   DebtScreen,
   DebtsScreen,
@@ -15,13 +32,19 @@ import {
   PeopleScreen,
   PersonScreen,
 } from "@/components/finance/screens";
-import { MotionScreen } from "@/components/finance/gsap-motion";
 import { PillButton } from "@/components/finance/ui";
 import { cn } from "@/lib/cn";
 import { currentMonth, debtTotals, shiftMonthKey } from "@/lib/finance/logic";
 import { readPinHash, writePinHash } from "@/lib/finance/pin";
-import { hydrateFinance, useFinance } from "@/lib/finance/store";
+import { getLocalUpdatedAt, hydrateFinance, pickFinanceData, useFinance } from "@/lib/finance/store";
 import { scheduleAllTaskNotifications } from "@/lib/notifications/scheduler";
+import {
+  getCachedGoogleToken,
+  getConfiguredGoogleClientId,
+  getGoogleDriveSyncController,
+  loadDriveSyncPrefs,
+  saveDriveSyncPrefs,
+} from "@/lib/sync/google-drive-gis";
 
 const TABS: { id: Tab; label: string; icon: typeof House }[] = [
   { id: "home", label: "اليوم", icon: House },
@@ -31,24 +54,70 @@ const TABS: { id: Tab; label: string; icon: typeof House }[] = [
   { id: "more", label: "أكثر", icon: Ellipsis },
 ];
 
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
 export function MizanRoot() {
   return <App />;
 }
 
+function sameRoute(a: Route, b: Route) {
+  if (a.name !== b.name) return false;
+  const aid = "id" in a ? a.id : "";
+  const bid = "id" in b ? b.id : "";
+  return aid === bid;
+}
+
 function App() {
-  useEffect(() => {
-    hydrateFinance();
-    void scheduleAllTaskNotifications();
-  }, []);
   const [tab, setTabState] = useState<Tab>("home");
   const [month, setMonth] = useState(currentMonth);
-  const [route, setRoute] = useState<Route>({ name: "main" });
+  const [stack, setStack] = useState<Route[]>([{ name: "main" }]);
   const [sheet, setSheet] = useState<SheetState>(null);
   const [query, setQuery] = useState("");
   const [frame, setFrame] = useState<HTMLElement | null>(null);
   const [compact, setCompact] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
-  const [pinHash, setPinHashState] = useState<string | null>(() => (typeof localStorage === "undefined" ? null : readPinHash()));
+  const [pinHash, setPinHashState] = useState<string | null>(null);
+
+  const route = stack[stack.length - 1] ?? { name: "main" };
+
+  useIsomorphicLayoutEffect(() => {
+    setPinHashState(readPinHash());
+  }, []);
+
+  useEffect(() => {
+    hydrateFinance();
+    void scheduleAllTaskNotifications();
+  }, []);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = useFinance.subscribe(() => {
+      const prefs = loadDriveSyncPrefs();
+      const clientId = getConfiguredGoogleClientId();
+      if (!prefs.autoSync || !clientId || !getCachedGoogleToken()) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        const controller = getGoogleDriveSyncController(clientId);
+        const state = useFinance.getState();
+        void controller
+          .sync(pickFinanceData(state), getLocalUpdatedAt())
+          .then((res) => {
+            if (res.source === "remote") {
+              state.replaceAll({ ...res.data, demo: false }, res.remoteUpdatedAt ?? Date.now());
+            }
+            if (res.state.phase === "synced") {
+              saveDriveSyncPrefs({ ...loadDriveSyncPrefs(), lastSyncedAt: Date.now() });
+            }
+          })
+          .catch(() => undefined);
+      }, 2500);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      unsubscribe();
+    };
+  }, []);
+
   const people = useFinance((s) => s.people);
   const debts = useFinance((s) => s.debts);
   const payments = useFinance((s) => s.payments);
@@ -61,9 +130,23 @@ function App() {
     if (!hash) setUnlocked(true);
   }
 
+  function pushRoute(next: Route) {
+    setStack((prev) => {
+      const top = prev[prev.length - 1];
+      if (top && sameRoute(top, next)) return prev;
+      return [...prev, next];
+    });
+    setCompact(false);
+  }
+
+  function back() {
+    setStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : [{ name: "main" }]));
+    setCompact(false);
+  }
+
   function setTab(next: Tab) {
     setTabState(next);
-    setRoute({ name: "main" });
+    setStack([{ name: "main" }]);
     setQuery("");
     setCompact(false);
   }
@@ -87,15 +170,16 @@ function App() {
         month,
         shiftMonth: (d) => setMonth((m) => shiftMonthKey(m, d)),
         route,
-        openPerson: (id) => setRoute({ name: "person", id }),
-        openDebt: (id) => setRoute({ name: "debt", id }),
-        openReport: () => setRoute({ name: "report" }),
-        openGoals: () => setRoute({ name: "goals" }),
-        openGoal: (id) => setRoute({ name: "goal", id }),
-        openWallets: () => setRoute({ name: "wallets" }),
-        openRecurring: () => setRoute({ name: "recurring" }),
-        openNotifications: () => setRoute({ name: "notifications" }),
-        back: () => setRoute({ name: "main" }),
+        openPerson: (id) => pushRoute({ name: "person", id }),
+        openDebt: (id) => pushRoute({ name: "debt", id }),
+        openReport: () => pushRoute({ name: "report" }),
+        openGoals: () => pushRoute({ name: "goals" }),
+        openGoal: (id) => pushRoute({ name: "goal", id }),
+        openWallets: () => pushRoute({ name: "wallets" }),
+        openRecurring: () => pushRoute({ name: "recurring" }),
+        openNotifications: () => pushRoute({ name: "notifications" }),
+        openDrive: () => pushRoute({ name: "drive" }),
+        back,
         sheet,
         openSheet: setSheet,
         closeSheet: () => setSheet(null),
@@ -107,7 +191,10 @@ function App() {
       }}
     >
       <div className="fixed inset-0 flex min-w-0 max-w-full justify-center overflow-hidden bg-surround text-label">
-        <div ref={setFrame} className="relative flex h-full min-w-0 w-full max-w-full flex-col overflow-hidden bg-grouped md:max-w-md">
+        <div
+          ref={setFrame}
+          className="relative flex h-full min-w-0 w-full max-w-full flex-col overflow-hidden bg-grouped md:max-w-md"
+        >
           <div
             className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain"
             onScroll={(e) => setCompact(e.currentTarget.scrollTop > 28)}
@@ -116,78 +203,90 @@ function App() {
               <LockScreen onUnlock={() => setUnlocked(true)} />
             ) : (
               <>
-            <header className={cn("sticky top-0 z-20 pt-safe", compact && "glass")}>
-              <div className="flex h-14 items-center justify-between px-2">
-                <div className="min-w-11">
-                  {route.name !== "main" ? (
-                    <button type="button" className="flex min-h-11 min-w-11 items-center justify-center text-tint" onClick={() => setRoute({ name: "main" })} aria-label="رجوع">
-                      <ChevronRight size={26} strokeWidth={2} />
-                    </button>
-                  ) : null}
-                </div>
-                <p className="truncate text-headline font-semibold">{compact || route.name !== "main" ? title : ""}</p>
-                <div className="flex min-w-11 justify-end">
-                  {showAdd ? (
-                    <PillButton onClick={openAdd}>إضافة</PillButton>
-                  ) : route.name === "person" ? (
-                    <button
-                      type="button"
-                      className="min-h-11 px-3 text-body text-tint"
-                      onClick={() => setSheet({ kind: "person", id: route.id })}
-                    >
-                      تعديل
-                    </button>
-                  ) : route.name === "goal" ? (
-                    <button
-                      type="button"
-                      className="min-h-11 px-3 text-body text-tint"
-                      onClick={() => setSheet({ kind: "goal", id: route.id })}
-                    >
-                      تعديل
-                    </button>
-                  ) : (
-                    <span className="min-w-11" />
-                  )}
-                </div>
-              </div>
-            </header>
+                <header className={cn("sticky top-0 z-20 pt-safe", compact && "glass")}>
+                  <div className="flex h-14 items-center justify-between px-2">
+                    <div className="min-w-11">
+                      {route.name !== "main" ? (
+                        <button
+                          type="button"
+                          className="flex min-h-11 min-w-11 items-center justify-center text-tint"
+                          onClick={back}
+                          aria-label="رجوع"
+                        >
+                          <ChevronRight size={26} strokeWidth={2} />
+                        </button>
+                      ) : null}
+                    </div>
+                    <p className="truncate text-headline font-semibold">
+                      {compact || route.name !== "main" ? title : ""}
+                    </p>
+                    <div className="flex min-w-11 justify-end">
+                      {showAdd ? (
+                        <PillButton onClick={openAdd}>إضافة</PillButton>
+                      ) : route.name === "person" ? (
+                        <button
+                          type="button"
+                          className="min-h-11 px-3 text-body text-tint"
+                          onClick={() => setSheet({ kind: "person", id: route.id })}
+                        >
+                          تعديل
+                        </button>
+                      ) : route.name === "goal" ? (
+                        <button
+                          type="button"
+                          className="min-h-11 px-3 text-body text-tint"
+                          onClick={() => setSheet({ kind: "goal", id: route.id })}
+                        >
+                          تعديل
+                        </button>
+                      ) : (
+                        <span className="min-w-11" />
+                      )}
+                    </div>
+                  </div>
+                </header>
 
-            <MotionScreen motionKey={`${tab}:${route.name}:${"id" in route ? route.id : ""}`}>
-              {route.name === "person" ? (
-                <PersonScreen id={route.id} />
-              ) : route.name === "debt" ? (
-                <DebtScreen id={route.id} />
-              ) : route.name === "report" ? (
-                <ReportScreen />
-              ) : route.name === "goals" ? (
-                <GoalsScreen />
-              ) : route.name === "goal" ? (
-                <GoalScreen id={route.id} />
-              ) : route.name === "wallets" ? (
-                <WalletsScreen />
-              ) : route.name === "recurring" ? (
-                <RecurringScreen />
-              ) : route.name === "notifications" ? (
-                <NotificationsScreen />
-              ) : tab === "home" ? (
-                <HomeScreen />
-              ) : tab === "ledger" ? (
-                <LedgerScreen />
-              ) : tab === "debts" ? (
-                <DebtsScreen />
-              ) : tab === "people" ? (
-                <PeopleScreen />
-              ) : (
-                <MoreScreen />
-              )}
-            </MotionScreen>
-            <div className={route.name === "main" ? "h-28" : "h-10"} />
+                <MotionScreen motionKey={`${tab}:${route.name}:${"id" in route ? route.id : ""}`}>
+                  {route.name === "person" ? (
+                    <PersonScreen id={route.id} />
+                  ) : route.name === "debt" ? (
+                    <DebtScreen id={route.id} />
+                  ) : route.name === "report" ? (
+                    <ReportScreen />
+                  ) : route.name === "goals" ? (
+                    <GoalsScreen />
+                  ) : route.name === "goal" ? (
+                    <GoalScreen id={route.id} />
+                  ) : route.name === "wallets" ? (
+                    <WalletsScreen />
+                  ) : route.name === "recurring" ? (
+                    <RecurringScreen />
+                  ) : route.name === "notifications" ? (
+                    <NotificationsScreen />
+                  ) : route.name === "drive" ? (
+                    <DriveSyncScreen />
+                  ) : tab === "home" ? (
+                    <HomeScreen />
+                  ) : tab === "ledger" ? (
+                    <LedgerScreen />
+                  ) : tab === "debts" ? (
+                    <DebtsScreen />
+                  ) : tab === "people" ? (
+                    <PeopleScreen />
+                  ) : (
+                    <MoreScreen />
+                  )}
+                </MotionScreen>
+                <div className={route.name === "main" ? "h-28" : "h-10"} />
               </>
             )}
           </div>
 
           {route.name === "main" && !locked ? (
-            <nav className="glass tab-bar absolute inset-x-3 z-30 flex max-w-[calc(100%-1.5rem)] min-w-0 items-stretch rounded-pill px-1 py-1" aria-label="الأقسام">
+            <nav
+              className="glass tab-bar absolute inset-x-3 z-30 flex max-w-[calc(100%-1.5rem)] min-w-0 items-stretch rounded-pill px-1 py-1"
+              aria-label="الأقسام"
+            >
               {TABS.map((item) => {
                 const on = tab === item.id;
                 const Icon = item.icon;
@@ -205,7 +304,12 @@ function App() {
                     )}
                   >
                     <span className="relative">
-                      <Icon size={22} strokeWidth={on ? 2.2 : 1.8} fill={on && item.id !== "more" ? "currentColor" : "none"} aria-hidden />
+                      <Icon
+                        size={22}
+                        strokeWidth={on ? 2.2 : 1.8}
+                        fill={on && item.id !== "more" ? "currentColor" : "none"}
+                        aria-hidden
+                      />
                       {badge > 0 ? (
                         <span className="absolute -top-1.5 -start-2 flex h-4 min-w-4 items-center justify-center rounded-pill bg-expense px-1 text-caption2 text-on-tint">
                           {badge}
@@ -229,7 +333,13 @@ function App() {
           {sheet?.kind === "recurring" ? <RecurringForm key={sheet.id ?? "new-rec"} id={sheet.id} /> : null}
           {sheet?.kind === "split" ? <SplitForm /> : null}
           {sheet?.kind === "goal" ? <GoalForm key={sheet.id ?? "new-goal"} id={sheet.id} /> : null}
-          {sheet?.kind === "goal-move" ? <GoalMoveForm key={`${sheet.goalId}-${sheet.withdraw ? "out" : "in"}`} goalId={sheet.goalId} withdraw={sheet.withdraw} /> : null}
+          {sheet?.kind === "goal-move" ? (
+            <GoalMoveForm
+              key={`${sheet.goalId}-${sheet.withdraw ? "out" : "in"}`}
+              goalId={sheet.goalId}
+              withdraw={sheet.withdraw}
+            />
+          ) : null}
           {sheet?.kind === "pin" ? <PinForm /> : null}
           <Toaster position="top-center" dir="rtl" offset={12} />
         </div>
@@ -253,6 +363,7 @@ function heading(
   if (route.name === "wallets") return "المحافظ";
   if (route.name === "recurring") return "المتكرر";
   if (route.name === "notifications") return "الإشعارات والمهام";
+  if (route.name === "drive") return "مزامنة Google Drive";
   if (tab === "home") return "اليوم";
   if (tab === "ledger") return "السجل";
   if (tab === "debts") return "الديون";

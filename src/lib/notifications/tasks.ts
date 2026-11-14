@@ -79,6 +79,10 @@ export function removeScheduledTask(id: string, storage: Storage = localStorage)
   persist(loadScheduledTasks(storage).filter((task) => task.id !== id), storage);
 }
 
+export function clearScheduledTasks(storage: Storage = localStorage) {
+  storage.removeItem(KEY);
+}
+
 export function nextOccurrence(task: ScheduledTask, from = new Date()): Date | null {
   const due = new Date(task.dueAt);
   if (task.repeat === "once") return due > from ? due : null;

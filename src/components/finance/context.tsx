@@ -11,7 +11,8 @@ export type Route =
   | { name: "goal"; id: string }
   | { name: "wallets" }
   | { name: "recurring" }
-  | { name: "notifications" };
+  | { name: "notifications" }
+  | { name: "drive" };
 
 export type SheetState =
   | null
@@ -42,6 +43,7 @@ export type MizanUI = {
   openWallets: () => void;
   openRecurring: () => void;
   openNotifications: () => void;
+  openDrive: () => void;
   back: () => void;
   sheet: SheetState;
   openSheet: (sheet: Exclude<SheetState, null>) => void;

@@ -29,6 +29,7 @@ export type SyncResult = {
   data: Data;
   source: "local" | "remote" | "uploaded" | "local-fallback";
   state: SyncState;
+  remoteUpdatedAt?: number;
 };
 
 export type DriveSyncController = {
@@ -99,7 +100,7 @@ export function createDriveSyncController(adapter: DriveSyncAdapter): DriveSyncC
       }
 
       if (!remote) {
-        const written = await adapter.write({
+        await adapter.write({
           version: SYNC_VERSION,
           updatedAt: localUpdatedAt,
           deviceId: "current-device",
@@ -113,7 +114,7 @@ export function createDriveSyncController(adapter: DriveSyncAdapter): DriveSyncC
       if (remote.updatedAt > localUpdatedAt) {
         const nextState: SyncState = { phase: "synced", lastSyncedAt: Date.now() };
         setState(nextState);
-        return { data: remote.data, source: "remote", state: nextState };
+        return { data: remote.data, source: "remote", state: nextState, remoteUpdatedAt: remote.updatedAt };
       }
 
       if (localUpdatedAt > remote.updatedAt) {

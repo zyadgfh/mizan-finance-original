@@ -91,7 +91,7 @@ export function TransferForm() {
     <Sheet title="تحويل" description="نقل مبلغ بين محفظتين" container={frame} onClose={closeSheet} trailing={<PillButton onClick={save}>تحويل</PillButton>}>
       <AmountField value={amount} onChange={setAmount} />
       <Section title="من وإلى">
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">من</span>
             <select className="field" value={fromId} onChange={(e) => setFromId(e.target.value)}>
@@ -159,7 +159,7 @@ export function WalletForm({ id }: { id?: string }) {
   return (
     <Sheet title={existing ? "تعديل محفظة" : "محفظة جديدة"} description="حساب نقدي" container={frame} onClose={closeSheet} trailing={<PillButton onClick={save}>حفظ</PillButton>}>
       <Section>
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">الاسم</span>
             <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="مثال: كاش البيت" />
@@ -215,7 +215,9 @@ export function RecurringForm({ id }: { id?: string }) {
   const removeRecurring = useFinance((s) => s.removeRecurring);
   const [kind, setKind] = useState<TxKind>(existing?.kind ?? "expense");
   const [amount, setAmount] = useState(existing ? String(existing.amount) : "");
-  const [categoryId, setCategoryId] = useState(existing?.categoryId ?? "");
+  const [categoryId, setCategoryId] = useState(
+    existing?.categoryId ?? categories.find((c) => c.kind === (existing?.kind ?? "expense"))?.id ?? "",
+  );
   const [walletId, setWalletId] = useState(existing?.walletId ?? wallets[0]?.id ?? "w-cash");
   const [note, setNote] = useState(existing?.note ?? "");
   const [day, setDay] = useState(String(existing?.day ?? 1));
@@ -258,7 +260,7 @@ export function RecurringForm({ id }: { id?: string }) {
         />
       </div>
       <Section title="التفاصيل">
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">الفئة</span>
             <select className="field" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
@@ -373,7 +375,7 @@ export function SplitForm() {
         {parts >= 2 && each > 0 ? `تقريباً ${each} لكل طرف. حصص الآخرين تخرج من المحفظة وتُسجَّل ديناً لك.` : "أنت دفعت المبلغ كاملاً."}
       </p>
       <Section title="من يدفع معك">
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <div className="flex min-h-11 items-center justify-between gap-3 px-4">
             <span className="text-body">أنا داخل القسمة</span>
             <Switch on={includeMe} onChange={setIncludeMe} label="إدخال حصتي" />
@@ -398,7 +400,7 @@ export function SplitForm() {
         </div>
       </Section>
       <Section title="الدفع">
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">الفئة</span>
             <select className="field" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
@@ -437,7 +439,7 @@ export function SplitForm() {
 }
 
 export function GoalForm({ id }: { id?: string }) {
-  const { closeSheet, frame } = useMizan();
+  const { closeSheet, frame, route, back } = useMizan();
   const goals = useFinance((s) => s.goals);
   const existing = goals.find((g) => g.id === id);
   const addGoal = useFinance((s) => s.addGoal);
@@ -464,7 +466,7 @@ export function GoalForm({ id }: { id?: string }) {
     <Sheet title={existing ? "تعديل هدف" : "هدف ادخار"} description="مبلغ وموعد" container={frame} onClose={closeSheet} trailing={<PillButton onClick={save}>حفظ</PillButton>}>
       <AmountField value={target} onChange={setTarget} label="المستهدف" />
       <Section>
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">الاسم</span>
             <input className="field" value={name} placeholder="سفر، جهاز…" onChange={(e) => setName(e.target.value)} />
@@ -482,6 +484,7 @@ export function GoalForm({ id }: { id?: string }) {
             tone="danger"
             onClick={() => {
               removeGoal(existing.id);
+              if (route.name === "goal" && route.id === existing.id) back();
               toast("حُذف الهدف وعاد المدّخر إلى محافظه");
               closeSheet();
             }}
@@ -541,7 +544,7 @@ export function GoalMoveForm({ goalId, withdraw }: { goalId: string; withdraw?: 
     >
       <AmountField value={amount} onChange={setAmount} />
       <Section>
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">المحفظة</span>
             <select className="field" value={walletId} onChange={(e) => setWalletId(e.target.value)}>
@@ -618,7 +621,7 @@ export function PinForm() {
         </div>
       ) : null}
       <Section>
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           {pinHash ? (
             <>
               <label className="flex min-h-11 items-center gap-3 px-4">
