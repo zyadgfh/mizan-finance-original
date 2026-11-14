@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { seedData } from "../finance/seed.ts";
 import { createDriveSyncController, SYNC_VERSION } from "./drive-sync.ts";
-import { createGoogleDriveAppDataAdapter } from "./google-drive-gis.ts";
+import {
+  clearCachedGoogleToken,
+  createGoogleDriveAppDataAdapter,
+  DRIVE_APPDATA_SCOPE,
+  getCachedGoogleToken,
+  requestGoogleDriveToken,
+} from "./google-drive-gis.ts";
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(typeof body === "string" ? body : JSON.stringify(body), {
@@ -111,5 +117,72 @@ describe("createGoogleDriveAppDataAdapter", () => {
       adapter.write({ version: SYNC_VERSION, updatedAt: 300, deviceId: "d1", data }, "stale-rev"),
       /412 revision conflict/,
     );
+  });
+});
+
+describe("Google Identity Services token client flow", () => {
+  it("requests access token synchronously when GIS is already loaded and validates granular scope", async () => {
+    const prevWindow = (globalThis as { window?: unknown }).window;
+    clearCachedGoogleToken();
+
+    let requestedSync = false;
+    let grantedScope = true;
+    let revokedToken: string | null = null;
+
+    (globalThis as { window?: unknown }).window = {
+      google: {
+        accounts: {
+          oauth2: {
+            initTokenClient(cfg: {
+              client_id: string;
+              scope: string;
+              callback: (resp: { access_token?: string; expires_in?: number }) => void;
+            }) {
+              assert.equal(cfg.client_id, "client-123.apps.googleusercontent.com");
+              assert.equal(cfg.scope, DRIVE_APPDATA_SCOPE);
+              return {
+                requestAccessToken() {
+                  requestedSync = true;
+                  cfg.callback({ access_token: "ya29.test", expires_in: 3600 });
+                },
+              };
+            },
+            hasGrantedAllScopes() {
+              return grantedScope;
+            },
+            revoke(tok: string, done?: (resp: { successful: boolean }) => void) {
+              revokedToken = tok;
+              done?.({ successful: true });
+            },
+          },
+        },
+      },
+    };
+
+    try {
+      grantedScope = false;
+      const rejectedPromise = requestGoogleDriveToken("client-123.apps.googleusercontent.com");
+      assert.equal(requestedSync, true);
+      await assert.rejects(rejectedPromise, /403 insufficient scope/);
+      assert.equal(getCachedGoogleToken(), null);
+
+      grantedScope = true;
+      requestedSync = false;
+      const tok = await requestGoogleDriveToken("client-123.apps.googleusercontent.com");
+      assert.equal(requestedSync, true);
+      assert.equal(tok, "ya29.test");
+      assert.equal(getCachedGoogleToken(), "ya29.test");
+
+      clearCachedGoogleToken();
+      assert.equal(revokedToken, "ya29.test");
+      assert.equal(getCachedGoogleToken(), null);
+    } finally {
+      clearCachedGoogleToken();
+      if (prevWindow === undefined) {
+        delete (globalThis as { window?: unknown }).window;
+      } else {
+        (globalThis as { window?: unknown }).window = prevWindow;
+      }
+    }
   });
 });

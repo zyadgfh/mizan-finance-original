@@ -1,5 +1,6 @@
 import { createDriveSyncController, type DriveSyncAdapter, type DriveSyncRecord } from "./drive-sync.ts";
 
+export const GSI_SCRIPT_SRC = "https://accounts.google.com/gsi/client";
 export const DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 export const DRIVE_BACKUP_FILENAME = "mizan-backup.json";
 
@@ -18,22 +19,33 @@ type DriveFileMeta = {
   modifiedTime?: string;
 };
 
+export type GoogleTokenResponse = {
+  access_token?: string;
+  expires_in?: number;
+  scope?: string;
+  error?: string;
+  error_description?: string;
+};
+
 type TokenClientConfig = {
   client_id: string;
   scope: string;
-  callback: (resp: { access_token?: string; expires_in?: number; error?: string; error_description?: string }) => void;
+  callback: (resp: GoogleTokenResponse) => void;
   error_callback?: (err: { type?: string; message?: string }) => void;
 };
 
-type GoogleWindow = Window & {
+type GoogleOAuth2 = {
+  initTokenClient: (config: TokenClientConfig) => {
+    requestAccessToken: (opts?: { prompt?: string }) => void;
+  };
+  hasGrantedAllScopes?: (tokenResponse: GoogleTokenResponse, firstScope: string, ...restScopes: string[]) => boolean;
+  revoke?: (token: string, done?: (resp: { successful?: boolean; error?: string }) => void) => void;
+};
+
+export type GoogleWindow = Window & {
   google?: {
     accounts?: {
-      oauth2?: {
-        initTokenClient: (config: TokenClientConfig) => {
-          requestAccessToken: (opts?: { prompt?: string }) => void;
-        };
-        revoke?: (token: string, done?: () => void) => void;
-      };
+      oauth2?: GoogleOAuth2;
     };
   };
 };
@@ -115,11 +127,16 @@ export function clearCachedGoogleToken(): void {
   if (token && typeof window !== "undefined") {
     const revoke = (window as GoogleWindow).google?.accounts?.oauth2?.revoke;
     try {
-      revoke?.(token);
+      revoke?.(token, () => undefined);
     } catch {
       /* ignore revoke error */
     }
   }
+}
+
+export function isGsiClientReady(): boolean {
+  if (typeof window === "undefined") return false;
+  return Boolean((window as GoogleWindow).google?.accounts?.oauth2?.initTokenClient);
 }
 
 export function loadGsiClient(): Promise<void> {
@@ -133,57 +150,79 @@ export function loadGsiClient(): Promise<void> {
   if (gsiLoadPromise) return gsiLoadPromise;
 
   gsiLoadPromise = new Promise<void>((resolve, reject) => {
-    const existing = document.querySelector<HTMLScriptElement>('script[src="https://accounts.google.com/gsi/client"]');
-    if (existing) {
-      existing.addEventListener("load", () => resolve(), { once: true });
-      existing.addEventListener("error", () => reject(new Error("network: failed to load Google Identity Services")), {
-        once: true,
-      });
-      return;
+    const existing = document.querySelector<HTMLScriptElement>(`script[src="${GSI_SCRIPT_SRC}"]`);
+    if (existing && existing.dataset.gisStatus === "error") {
+      existing.remove();
     }
-    const script = document.createElement("script");
-    script.src = "https://accounts.google.com/gsi/client";
-    script.async = true;
-    script.defer = true;
+
+    const script =
+      existing && existing.dataset.gisStatus !== "error" ? existing : document.createElement("script");
+    const isNew = script !== existing || existing.dataset.gisStatus === "error";
+
+    let settled = false;
     const timeout = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      script.dataset.gisStatus = "error";
       gsiLoadPromise = null;
       reject(new Error("timeout loading Google Identity Services"));
     }, 12_000);
-    script.onload = () => {
+
+    const onLoad = () => {
+      if (settled) return;
+      settled = true;
       window.clearTimeout(timeout);
-      resolve();
+      if (gw.google?.accounts?.oauth2?.initTokenClient) {
+        script.dataset.gisStatus = "loaded";
+        resolve();
+      } else {
+        script.dataset.gisStatus = "error";
+        gsiLoadPromise = null;
+        reject(new Error("Google Identity Services OAuth client unavailable"));
+      }
     };
-    script.onerror = () => {
+
+    const onError = () => {
+      if (settled) return;
+      settled = true;
       window.clearTimeout(timeout);
+      script.dataset.gisStatus = "error";
       gsiLoadPromise = null;
       reject(new Error("network: failed to load Google Identity Services"));
     };
-    document.head.appendChild(script);
+
+    script.addEventListener("load", onLoad, { once: true });
+    script.addEventListener("error", onError, { once: true });
+
+    if (isNew) {
+      script.src = GSI_SCRIPT_SRC;
+      script.async = true;
+      document.head.appendChild(script);
+    }
   });
 
   return gsiLoadPromise;
 }
 
-export async function requestGoogleDriveToken(clientId: string, prompt: "" | "consent" | "select_account" = ""): Promise<string> {
-  const cached = prompt === "" ? getCachedGoogleToken() : null;
-  if (cached) return cached;
-
-  const trimmed = clientId.trim();
-  if (!trimmed) throw new Error("unauthorized: Google OAuth Client ID is missing");
-
-  await loadGsiClient();
-  const oauth2 = (window as GoogleWindow).google?.accounts?.oauth2;
-  if (!oauth2?.initTokenClient) {
-    throw new Error("Google Identity Services OAuth client unavailable");
-  }
-
+function requestTokenWithOAuth2(
+  oauth2: GoogleOAuth2,
+  clientId: string,
+  prompt: "" | "consent" | "select_account",
+): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const client = oauth2.initTokenClient({
-      client_id: trimmed,
+      client_id: clientId,
       scope: DRIVE_APPDATA_SCOPE,
       callback: (resp) => {
         if (resp.error || !resp.access_token) {
           reject(new Error(`401 unauthorized: ${resp.error_description || resp.error || "no token"}`));
+          return;
+        }
+        if (
+          typeof oauth2.hasGrantedAllScopes === "function" &&
+          !oauth2.hasGrantedAllScopes(resp, DRIVE_APPDATA_SCOPE)
+        ) {
+          reject(new Error("403 insufficient scope: drive.appdata permission not granted"));
           return;
         }
         const ttlMs = Math.max(60, Number(resp.expires_in ?? 3500)) * 1000;
@@ -194,7 +233,32 @@ export async function requestGoogleDriveToken(clientId: string, prompt: "" | "co
         reject(new Error(`401 unauthorized: ${err.message || err.type || "popup cancelled"}`));
       },
     });
+    // Triggered synchronously when GIS is already preloaded so browsers keep user-gesture activation.
     client.requestAccessToken({ prompt });
+  });
+}
+
+export function requestGoogleDriveToken(
+  clientId: string,
+  prompt: "" | "consent" | "select_account" = "",
+): Promise<string> {
+  const cached = prompt === "" ? getCachedGoogleToken() : null;
+  if (cached) return Promise.resolve(cached);
+
+  const trimmed = clientId.trim();
+  if (!trimmed) return Promise.reject(new Error("unauthorized: Google OAuth Client ID is missing"));
+
+  const preloaded = typeof window !== "undefined" ? (window as GoogleWindow).google?.accounts?.oauth2 : undefined;
+  if (preloaded?.initTokenClient) {
+    return requestTokenWithOAuth2(preloaded, trimmed, prompt);
+  }
+
+  return loadGsiClient().then(() => {
+    const oauth2 = (window as GoogleWindow).google?.accounts?.oauth2;
+    if (!oauth2?.initTokenClient) {
+      throw new Error("Google Identity Services OAuth client unavailable");
+    }
+    return requestTokenWithOAuth2(oauth2, trimmed, prompt);
   });
 }
 

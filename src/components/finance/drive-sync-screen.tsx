@@ -1,5 +1,5 @@
-import { CheckCircle2, Cloud, CloudOff, KeyRound, RefreshCw, ShieldCheck, Unlink } from "lucide-react";
-import { useState } from "react";
+import { CheckCircle2, Cloud, CloudOff, KeyRound, RefreshCw, ShieldCheck, Unlink, UserCheck } from "lucide-react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Group, PillButton, Row, Section } from "@/components/finance/ui";
 import { shortDate } from "@/lib/finance/logic";
@@ -12,6 +12,7 @@ import {
   getEnvGoogleClientId,
   getGoogleDriveSyncController,
   loadDriveSyncPrefs,
+  loadGsiClient,
   requestGoogleDriveToken,
   resetGoogleDriveSyncController,
   saveDriveSyncPrefs,
@@ -37,14 +38,20 @@ export function DriveSyncScreen() {
 
   const activeClientId = envClientId || clientId.trim();
 
-  async function runSync(forcePrompt = false) {
+  useEffect(() => {
+    // Pre-warm Google Identity Services (https://accounts.google.com/gsi/client)
+    // so clicking Sync triggers requestAccessToken() synchronously within the user gesture.
+    void loadGsiClient().catch(() => undefined);
+  }, []);
+
+  async function runSync(promptMode: "" | "consent" | "select_account" = "") {
     if (!activeClientId) {
       toast.error("أدخل Google OAuth Client ID أولاً أو اضبط VITE_GOOGLE_CLIENT_ID");
       return;
     }
     setBusy(true);
     try {
-      await requestGoogleDriveToken(activeClientId, forcePrompt ? "consent" : "");
+      await requestGoogleDriveToken(activeClientId, promptMode);
       setConnected(true);
       const controller = getGoogleDriveSyncController(activeClientId);
       const localData = pickFinanceData(useFinance.getState());
@@ -80,9 +87,14 @@ export function DriveSyncScreen() {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
-      if (msg.includes("401")) {
+      if (msg.includes("403")) {
+        setConnected(false);
+        toast.error("لم تُمنح صلاحية مجلد التطبيقات (drive.appdata) — أعد التفويض وفعّل الصلاحية");
+      } else if (msg.includes("401")) {
         setConnected(false);
         toast.error("أُلغي تفويض Google Drive أو لم يكتمل");
+      } else if (msg.includes("network") || msg.includes("timeout")) {
+        toast.error("تعذّر تحميل مكتبة Google Identity — تحقّق من الاتصال بالإنترنت");
       } else {
         toast.error("تعذّر الاتصال بخدمة Google");
       }
@@ -148,7 +160,7 @@ export function DriveSyncScreen() {
             title={statusLabel}
             sub={`آخر مزامنة: ${formatSyncTime(prefs.lastSyncedAt)}`}
             trailing={
-              <PillButton onClick={() => void runSync(false)} disabled={busy || !activeClientId}>
+              <PillButton onClick={() => void runSync("")} disabled={busy || !activeClientId}>
                 <RefreshCw size={14} className={busy ? "animate-spin" : undefined} />
                 <span>{busy ? "جارٍ…" : "مزامنة الآن"}</span>
               </PillButton>
@@ -164,24 +176,45 @@ export function DriveSyncScreen() {
             sub="نطاق drive.appdata فقط — لا يصل لبقية ملفات Drive"
           />
           {connected ? (
-            <Row
-              leading={
-                <span className="icon-tile" style={{ background: "var(--orange)" }}>
-                  <CloudOff size={16} />
-                </span>
-              }
-              title="المزامنة التلقائية أثناء الجلسة"
-              sub="رفع تلقائي عند تعديل السجل ما دامت الجلسة نشطة"
-              trailing={
-                <input
-                  type="checkbox"
-                  checked={prefs.autoSync}
-                  onChange={(e) => toggleAutoSync(e.target.checked)}
-                  className="h-5 w-5 accent-tint"
-                  aria-label="المزامنة التلقائية"
-                />
-              }
-            />
+            <>
+              <Row
+                leading={
+                  <span className="icon-tile" style={{ background: "var(--orange)" }}>
+                    <CloudOff size={16} />
+                  </span>
+                }
+                title="المزامنة التلقائية أثناء الجلسة"
+                sub="رفع تلقائي عند تعديل السجل ما دامت الجلسة نشطة"
+                trailing={
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={prefs.autoSync}
+                    aria-label="المزامنة التلقائية"
+                    onClick={() => toggleAutoSync(!prefs.autoSync)}
+                    className={`tap-target relative h-7 w-12 rounded-full transition-colors ${
+                      prefs.autoSync ? "bg-green" : "bg-fill"
+                    }`}
+                  >
+                    <span
+                      className={`block h-6 w-6 rounded-full bg-white shadow-sm transition-transform ${
+                        prefs.autoSync ? "-translate-x-5.5" : "-translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                }
+              />
+              <Row
+                leading={
+                  <span className="icon-tile" style={{ background: "var(--tint)" }}>
+                    <UserCheck size={16} />
+                  </span>
+                }
+                title="تبديل حساب Google"
+                sub="اختيار حساب آخر أو إعادة منح الأذونات"
+                onClick={() => void runSync("select_account")}
+              />
+            </>
           ) : null}
         </Group>
       </Section>
