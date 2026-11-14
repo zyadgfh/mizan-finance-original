@@ -1,0 +1,4 @@
+# Local-only generated dependencies and machine settings
+node_modules/
+android/local.properties
+.DS_Store
