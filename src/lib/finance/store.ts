@@ -1,8 +1,24 @@
 import { create } from "zustand";
 import { clearScheduledTasks } from "../notifications/tasks.ts";
-import { currentMonth, defaultWallets, isCurrency, round2, todayISO } from "./logic.ts";
+import {
+  decryptBackupPayload,
+  encryptBackupPayload,
+  isEncryptedBackupEnvelope,
+  validateBackupJsonObject,
+} from "../sync/crypto-backup.ts";
+import {
+  currentMonth,
+  defaultExchangeRatesFor,
+  defaultWallets,
+  effectiveExchangeRate,
+  isCurrency,
+  round2,
+  round4,
+  todayISO,
+} from "./logic.ts";
 import { writePinHash } from "./pin.ts";
 import { clearReceipts, exportAllReceipts, importAllReceipts } from "./receipts.ts";
+import { overwriteAndClearLocalKeys } from "./security.ts";
 import { seedData } from "./seed.ts";
 import type {
   Budget,
@@ -10,8 +26,11 @@ import type {
   Currency,
   Data,
   Debt,
+  DebtAuditEntry,
+  DebtCadence,
   DebtDirection,
   Goal,
+  GoalCategory,
   GoalMove,
   Payment,
   Person,
@@ -25,11 +44,15 @@ import type {
 
 const KEY = "mizan.v1";
 const UPDATED_AT_KEY = "mizan.updatedAt";
+const PENDING_SYNC_KEY = "mizan.drive.pending";
 
 export type TxInput = {
   id?: string;
   kind: TxKind;
   amount: number;
+  currency?: Currency;
+  exchangeRate?: number;
+  baseAmount?: number;
   categoryId: string;
   note: string;
   date: string;
@@ -48,6 +71,7 @@ export type DebtInput = {
   dueDate: string;
   note: string;
   installments: number;
+  cadence?: DebtCadence;
 };
 
 export type PersonInput = { name: string; phone: string; note: string };
@@ -100,7 +124,9 @@ type Actions = {
   setBudget: (categoryId: string, limit: number) => void;
   setOpening: (n: number) => void;
   setCurrency: (c: Currency) => void;
+  setExchangeRate: (currency: Currency, rate: number) => void;
   setPhoneCountryCode: (code: string) => void;
+  importTransactionsBulk: (inputs: TxInput[]) => number;
   addWallet: (input: { name: string; kind: WalletKind; opening: number }) => string;
   updateWallet: (id: string, input: { name: string; kind: WalletKind; opening: number }) => void;
   removeWallet: (id: string) => boolean;
@@ -112,8 +138,8 @@ type Actions = {
   removeRecurring: (id: string) => void;
   confirmRecurring: (id: string) => string | null;
   skipRecurring: (id: string) => void;
-  addGoal: (input: { name: string; target: number; deadline: string }) => string;
-  updateGoal: (id: string, input: { name: string; target: number; deadline: string }) => void;
+  addGoal: (input: { name: string; target: number; deadline: string; category?: GoalCategory; linkedDebtId?: string }) => string;
+  updateGoal: (id: string, input: { name: string; target: number; deadline: string; category?: GoalCategory; linkedDebtId?: string }) => void;
   removeGoal: (id: string) => void;
   addGoalMove: (input: { goalId: string; walletId: string; amount: number; date: string; note: string }) => string;
   removeGoalMove: (id: string) => GoalMove | undefined;
@@ -143,6 +169,7 @@ export function pickFinanceData(s: Data): Data {
     budgets: s.budgets,
     openingBalance: s.openingBalance,
     currency: s.currency,
+    exchangeRates: s.exchangeRates,
     phoneCountryCode: s.phoneCountryCode,
     demo: s.demo,
     wallets: s.wallets,
@@ -150,7 +177,13 @@ export function pickFinanceData(s: Data): Data {
     recurring: s.recurring,
     goals: s.goals,
     goalMoves: s.goalMoves,
+    debtLogs: s.debtLogs ?? [],
   };
+}
+
+function appendAudit(logs: DebtAuditEntry[] | undefined, entry: Omit<DebtAuditEntry, "id" | "at">): DebtAuditEntry[] {
+  const next: DebtAuditEntry = { ...entry, id: uid(), at: Date.now() };
+  return [next, ...(logs ?? [])].slice(0, 300);
 }
 
 function cashOpeningOf(wallets: Wallet[], fallback: number) {
@@ -170,14 +203,58 @@ export function setLocalUpdatedAt(ts: number): void {
   localStorage.setItem(UPDATED_AT_KEY, String(Math.max(0, Math.round(ts))));
 }
 
+export function getPendingCloudSync(): boolean {
+  if (typeof localStorage === "undefined") return false;
+  return localStorage.getItem(PENDING_SYNC_KEY) === "1";
+}
+
+export function setPendingCloudSync(pending: boolean): void {
+  if (typeof localStorage === "undefined") return;
+  if (pending) localStorage.setItem(PENDING_SYNC_KEY, "1");
+  else localStorage.removeItem(PENDING_SYNC_KEY);
+}
+
+function resolveTxCurrencyFields(
+  input: Pick<TxInput, "amount" | "currency" | "exchangeRate" | "baseAmount">,
+  accountCurrency: Currency,
+  rates?: Partial<Record<Currency, number>>,
+): {
+  amount: number;
+  currency?: Currency;
+  exchangeRate?: number;
+  baseAmount?: number;
+} {
+  const amount = round2(input.amount);
+  const txCurrency = input.currency ?? accountCurrency;
+  if (txCurrency === accountCurrency) {
+    return { amount, currency: undefined, exchangeRate: undefined, baseAmount: undefined };
+  }
+  const rawRate =
+    typeof input.exchangeRate === "number" && Number.isFinite(input.exchangeRate) && input.exchangeRate > 0
+      ? round4(input.exchangeRate)
+      : effectiveExchangeRate(txCurrency, accountCurrency, rates);
+  const baseAmount =
+    typeof input.baseAmount === "number" && Number.isFinite(input.baseAmount) && input.baseAmount > 0
+      ? round2(input.baseAmount)
+      : round2(amount * rawRate);
+  return {
+    amount,
+    currency: txCurrency,
+    exchangeRate: rawRate,
+    baseAmount,
+  };
+}
+
 export const useFinance = create<Data & Actions>((set, get) => ({
   ...seedData(),
   addTxn: (input) => {
     const id = input.id ?? uid();
+    const state = get();
+    const moneyFields = resolveTxCurrencyFields(input, state.currency, state.exchangeRates);
     const tx: Tx = {
       id,
       kind: input.kind,
-      amount: round2(input.amount),
+      ...moneyFields,
       categoryId: input.categoryId,
       note: input.note.trim(),
       date: input.date,
@@ -188,20 +265,21 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       receiptId: input.receiptId,
       createdAt: Date.now(),
     };
-    set({ txns: [tx, ...get().txns.filter((t) => t.id !== id)] });
+    set({ txns: [tx, ...state.txns.filter((t) => t.id !== id)] });
     return id;
   },
   updateTxn: (id, input) => {
-    const existing = get().txns.find((t) => t.id === id);
+    const state = get();
+    const existing = state.txns.find((t) => t.id === id);
     if (!existing) return false;
-    const linkedPayment = get().payments.find((p) => p.txId === id);
+    const linkedPayment = state.payments.find((p) => p.txId === id);
     const amount = round2(input.amount);
     if (!Number.isFinite(amount) || amount <= 0) return false;
 
     if (linkedPayment) {
-      const debt = get().debts.find((d) => d.id === linkedPayment.debtId);
+      const debt = state.debts.find((d) => d.id === linkedPayment.debtId);
       if (debt) {
-        const otherPaid = get().payments.reduce(
+        const otherPaid = state.payments.reduce(
           (s, p) => (p.debtId === debt.id && p.id !== linkedPayment.id ? s + p.amount : s),
           0,
         );
@@ -210,8 +288,9 @@ export const useFinance = create<Data & Actions>((set, get) => ({
         }
       }
       const nextKind = debt ? (debt.direction === "receivable" ? "income" : "expense") : existing.kind;
+      const amountChanged = linkedPayment.amount !== amount || linkedPayment.date !== input.date;
       set({
-        txns: get().txns.map((t) =>
+        txns: state.txns.map((t) =>
           t.id === id
             ? {
                 ...t,
@@ -226,7 +305,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
               }
             : t,
         ),
-        payments: get().payments.map((p) =>
+        payments: state.payments.map((p) =>
           p.id === linkedPayment.id
             ? {
                 ...p,
@@ -237,17 +316,39 @@ export const useFinance = create<Data & Actions>((set, get) => ({
               }
             : p,
         ),
+        debtLogs:
+          debt && amountChanged
+            ? appendAudit(state.debtLogs, {
+                debtId: debt.id,
+                action: "payment-edited",
+                summary: `تعديل دفعة سابقة من ${linkedPayment.amount} إلى ${amount}`,
+                beforeAmount: linkedPayment.amount,
+                afterAmount: amount,
+                beforeDate: linkedPayment.date,
+                afterDate: input.date,
+              })
+            : state.debtLogs,
       });
       return true;
     }
 
+    const preservedRate =
+      input.currency && input.currency === existing.currency && input.exchangeRate === undefined
+        ? existing.exchangeRate
+        : input.exchangeRate;
+    const moneyFields = resolveTxCurrencyFields(
+      { ...input, exchangeRate: preservedRate },
+      state.currency,
+      state.exchangeRates,
+    );
+
     set({
-      txns: get().txns.map((t) =>
+      txns: state.txns.map((t) =>
         t.id === id
           ? {
               ...t,
               kind: input.kind,
-              amount,
+              ...moneyFields,
               categoryId: input.categoryId,
               note: input.note.trim(),
               date: input.date,
@@ -315,21 +416,44 @@ export const useFinance = create<Data & Actions>((set, get) => ({
   },
   addDebt: (input) => {
     const id = uid();
+    const principal = round2(input.principal);
+    const title = input.title.trim() || "دين";
     const debt: Debt = {
       id,
       personId: input.personId,
       direction: input.direction,
-      title: input.title.trim() || "دين",
+      title,
       note: input.note.trim(),
-      principal: round2(input.principal),
+      principal,
       dueDate: input.dueDate,
       installments: clampInstallments(input.installments),
+      cadence: input.cadence ?? "monthly",
       createdAt: Date.now(),
     };
-    set({ debts: [debt, ...get().debts] });
+    set({
+      debts: [debt, ...get().debts],
+      debtLogs: appendAudit(get().debtLogs, {
+        debtId: id,
+        action: "created",
+        summary: `تسجيل دين «${title}» بمبلغ ${principal}`,
+        afterAmount: principal,
+        afterDate: input.dueDate || undefined,
+      }),
+    });
     return id;
   },
   updateDebt: (id, input) => {
+    const prev = get().debts.find((d) => d.id === id);
+    const nextPrincipal = round2(input.principal);
+    const nextInstallments = clampInstallments(input.installments);
+    const nextCadence = input.cadence ?? prev?.cadence ?? "monthly";
+    const changes: string[] = [];
+    if (prev) {
+      if (prev.principal !== nextPrincipal) changes.push(`المبلغ: ${prev.principal} → ${nextPrincipal}`);
+      if ((prev.dueDate || "") !== (input.dueDate || "")) changes.push(`الاستحقاق: ${prev.dueDate || "—"} → ${input.dueDate || "—"}`);
+      if ((prev.installments || 1) !== nextInstallments) changes.push(`الأقساط: ${prev.installments || 1} → ${nextInstallments}`);
+      if ((prev.cadence ?? "monthly") !== nextCadence) changes.push("تغيير التكرار");
+    }
     set({
       debts: get().debts.map((d) =>
         d.id === id
@@ -339,12 +463,25 @@ export const useFinance = create<Data & Actions>((set, get) => ({
               direction: input.direction,
               title: input.title.trim() || "دين",
               note: input.note.trim(),
-              principal: round2(input.principal),
+              principal: nextPrincipal,
               dueDate: input.dueDate,
-              installments: clampInstallments(input.installments),
+              installments: nextInstallments,
+              cadence: nextCadence,
             }
           : d,
       ),
+      debtLogs:
+        prev && changes.length
+          ? appendAudit(get().debtLogs, {
+              debtId: id,
+              action: "debt-edited",
+              summary: `تعديل الدين (${changes.join(" · ")})`,
+              beforeAmount: prev.principal,
+              afterAmount: nextPrincipal,
+              beforeDate: prev.dueDate || undefined,
+              afterDate: input.dueDate || undefined,
+            })
+          : get().debtLogs,
     });
   },
   removeDebt: (id) => {
@@ -357,6 +494,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       debts: get().debts.filter((d) => d.id !== id),
       payments: get().payments.filter((p) => p.debtId !== id),
       txns: get().txns.filter((t) => !txIds.has(t.id)),
+      debtLogs: (get().debtLogs ?? []).filter((l) => l.debtId !== id),
     });
     return { debt, payments, txns };
   },
@@ -370,6 +508,10 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     const debt = get().debts.find((d) => d.id === input.debtId);
     if (!debt) return "";
     const id = uid();
+    const amount = round2(input.amount);
+    const priorPaid = get().payments.reduce((s, p) => (p.debtId === debt.id ? s + p.amount : s), 0);
+    const beforeRem = round2(Math.max(0, debt.principal - priorPaid));
+    const afterRem = round2(Math.max(0, beforeRem - amount));
     let txId: string | undefined;
     if (input.linkCash) {
       txId = uid();
@@ -378,7 +520,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       const tx: Tx = {
         id: txId,
         kind: income ? "income" : "expense",
-        amount: round2(input.amount),
+        amount,
         categoryId,
         note: input.note.trim() || `${income ? "تحصيل" : "سداد"} · ${debt.title}`,
         date: input.date,
@@ -393,23 +535,44 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     const payment: Payment = {
       id,
       debtId: input.debtId,
-      amount: round2(input.amount),
+      amount,
       date: input.date,
       note: input.note.trim(),
       walletId: input.linkCash ? input.walletId || "w-cash" : undefined,
       txId,
       createdAt: Date.now(),
     };
-    set({ payments: [payment, ...get().payments] });
+    set({
+      payments: [payment, ...get().payments],
+      debtLogs: appendAudit(get().debtLogs, {
+        debtId: debt.id,
+        action: "payment-added",
+        summary: `${debt.direction === "receivable" ? "تحصيل" : "سداد"} دفعة ${amount}`,
+        beforeAmount: beforeRem,
+        afterAmount: afterRem,
+        afterDate: input.date,
+      }),
+    });
     return id;
   },
   removePayment: (id) => {
     const payment = get().payments.find((p) => p.id === id);
     if (!payment) return undefined;
+    const debt = get().debts.find((d) => d.id === payment.debtId);
     const tx = payment.txId ? get().txns.find((t) => t.id === payment.txId) : undefined;
     set({
       payments: get().payments.filter((p) => p.id !== id),
       txns: tx ? get().txns.filter((t) => t.id !== tx.id) : get().txns,
+      debtLogs: debt
+        ? appendAudit(get().debtLogs, {
+            debtId: debt.id,
+            action: "payment-deleted",
+            summary: `حذف دفعة بقيمة ${payment.amount} (${payment.date})`,
+            beforeAmount: payment.amount,
+            afterAmount: 0,
+            beforeDate: payment.date,
+          })
+        : get().debtLogs,
     });
     return { payment, tx };
   },
@@ -447,10 +610,54 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       : [{ id: "w-cash", name: "كاش", kind: "cash" as const, opening, createdAt: Date.now() }, ...get().wallets];
     set({ openingBalance: opening, wallets });
   },
-  setCurrency: (c) => set({ currency: c }),
+  setCurrency: (c) => {
+    const prev = get().currency;
+    if (prev === c) return;
+    set({
+      currency: c,
+      exchangeRates: defaultExchangeRatesFor(c),
+    });
+  },
+  setExchangeRate: (currency, rate) => {
+    if (currency === get().currency) return;
+    if (!Number.isFinite(rate) || rate <= 0) return;
+    set({
+      exchangeRates: {
+        ...(get().exchangeRates ?? defaultExchangeRatesFor(get().currency)),
+        [currency]: round4(rate),
+      },
+    });
+  },
   setPhoneCountryCode: (code) => {
     const sanitized = code.replace(/\D/g, "").slice(0, 4);
     set({ phoneCountryCode: sanitized || undefined });
+  },
+  importTransactionsBulk: (inputs) => {
+    const state = get();
+    const now = Date.now();
+    const created: Tx[] = [];
+    for (let i = 0; i < inputs.length; i++) {
+      const item = inputs[i];
+      if (!Number.isFinite(item.amount) || item.amount <= 0) continue;
+      const moneyFields = resolveTxCurrencyFields(item, state.currency, state.exchangeRates);
+      created.push({
+        id: item.id ?? uid(),
+        kind: item.kind,
+        ...moneyFields,
+        categoryId: item.categoryId,
+        note: item.note.trim(),
+        date: item.date,
+        personId: item.personId || undefined,
+        walletId: item.walletId || "w-cash",
+        source: item.source ?? "manual",
+        reported: item.reported !== false,
+        receiptId: item.receiptId,
+        createdAt: now + i,
+      });
+    }
+    if (!created.length) return 0;
+    set({ txns: [...created, ...state.txns], demo: false });
+    return created.length;
   },
   addWallet: (input) => {
     const id = uid();
@@ -569,6 +776,8 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       name: input.name.trim() || "هدف",
       target: round2(input.target),
       deadline: input.deadline,
+      category: input.category ?? "general",
+      linkedDebtId: input.linkedDebtId || undefined,
       createdAt: Date.now(),
     };
     set({ goals: [goal, ...get().goals] });
@@ -577,7 +786,16 @@ export const useFinance = create<Data & Actions>((set, get) => ({
   updateGoal: (id, input) => {
     set({
       goals: get().goals.map((g) =>
-        g.id === id ? { ...g, name: input.name.trim() || g.name, target: round2(input.target), deadline: input.deadline } : g,
+        g.id === id
+          ? {
+              ...g,
+              name: input.name.trim() || g.name,
+              target: round2(input.target),
+              deadline: input.deadline,
+              category: input.category ?? g.category ?? "general",
+              linkedDebtId: input.linkedDebtId !== undefined ? input.linkedDebtId || undefined : g.linkedDebtId,
+            }
+          : g,
       ),
     });
   },
@@ -697,12 +915,14 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       recurring: [],
       goals: [],
       goalMoves: [],
+      debtLogs: [],
     });
     void clearReceipts();
     if (options?.clearSecurityAndTasks && typeof localStorage !== "undefined") {
       try {
         writePinHash(null);
         clearScheduledTasks();
+        overwriteAndClearLocalKeys(localStorage);
       } catch {
         /* ignore storage errors */
       }
@@ -759,12 +979,16 @@ export function asData(raw: unknown): Data | null {
   return {
     txns: d.txns,
     people: d.people,
-    debts: d.debts.map((debt) => ({ ...debt, installments: debt.installments || 1 })),
+    debts: d.debts.map((debt) => ({ ...debt, installments: debt.installments || 1, cadence: debt.cadence ?? "monthly" })),
     payments: d.payments,
     categories,
     budgets: Array.isArray(d.budgets) ? d.budgets : [],
     openingBalance: cashOpeningOf(wallets, opening),
     currency: isCurrency(d.currency) ? d.currency : "EGP",
+    exchangeRates:
+      d.exchangeRates && typeof d.exchangeRates === "object"
+        ? d.exchangeRates
+        : defaultExchangeRatesFor(isCurrency(d.currency) ? d.currency : "EGP"),
     phoneCountryCode,
     demo: Boolean(d.demo),
     wallets,
@@ -772,6 +996,7 @@ export function asData(raw: unknown): Data | null {
     recurring: Array.isArray(d.recurring) ? d.recurring : [],
     goals: Array.isArray(d.goals) ? d.goals : [],
     goalMoves: Array.isArray(d.goalMoves) ? d.goalMoves : [],
+    debtLogs: Array.isArray(d.debtLogs) ? d.debtLogs : [],
   };
 }
 
@@ -806,6 +1031,7 @@ export function hydrateFinance() {
       return;
     }
     setLocalUpdatedAt(Date.now());
+    setPendingCloudSync(true);
   });
   subscribed = true;
   if (!localStorage.getItem(KEY)) {
@@ -814,14 +1040,14 @@ export function hydrateFinance() {
   }
 }
 
-function download(blob: Blob, filename: string) {
+export function downloadExportBlob(blob: Blob, filename: string) {
   const nativeBridge = (
     window as Window & {
       MizanNative?: { shareFile?: (name: string, mimeType: string, content: string) => boolean };
     }
   ).MizanNative;
 
-  if (nativeBridge?.shareFile) {
+  if (nativeBridge?.shareFile && !blob.type.startsWith("image/")) {
     void blob.text().then((content) => {
       const ok = nativeBridge.shareFile?.(filename, blob.type || "application/octet-stream", content);
       if (ok) return;
@@ -855,21 +1081,26 @@ function download(blob: Blob, filename: string) {
 }
 
 export function exportData() {
-  download(
+  downloadExportBlob(
     new Blob([JSON.stringify(pickFinanceData(useFinance.getState()), null, 2)], { type: "application/json" }),
     "mizan-backup.json",
   );
 }
 
-export async function exportDataAsync(options: { includeReceipts?: boolean } = {}) {
+export async function exportDataAsync(options: { includeReceipts?: boolean; passphrase?: string } = {}) {
   const base = pickFinanceData(useFinance.getState());
-  if (!options.includeReceipts) {
-    download(new Blob([JSON.stringify(base, null, 2)], { type: "application/json" }), "mizan-backup.json");
+  const receipts = options.includeReceipts ? await exportAllReceipts() : {};
+  const payload = Object.keys(receipts).length ? { ...base, receipts } : base;
+  const jsonText = JSON.stringify(payload, null, 2);
+  if (options.passphrase?.trim()) {
+    const encrypted = await encryptBackupPayload(jsonText, options.passphrase.trim());
+    downloadExportBlob(
+      new Blob([JSON.stringify(encrypted, null, 2)], { type: "application/json" }),
+      "mizan-backup-encrypted.json",
+    );
     return;
   }
-  const receipts = await exportAllReceipts();
-  const payload = Object.keys(receipts).length ? { ...base, receipts } : base;
-  download(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }), "mizan-backup.json");
+  downloadExportBlob(new Blob([jsonText], { type: "application/json" }), "mizan-backup.json");
 }
 
 function csvCell(value: string | number) {
@@ -885,44 +1116,85 @@ export function exportCsv() {
   const s = useFinance.getState();
   const walletName = (id?: string) => s.wallets.find((w) => w.id === (id || "w-cash"))?.name ?? "";
   const personName = (id?: string) => s.people.find((p) => p.id === id)?.name ?? "";
-  const lines = ["النوع,التاريخ,البيان,التفاصيل,الشخص,المحفظة,الاتجاه,المبلغ"];
+  const lines = ["النوع,التاريخ,البيان,التفاصيل,الشخص,المحفظة,الاتجاه,المبلغ,العملة,سعر الصرف,المبلغ الأساسي"];
   for (const t of [...s.txns].sort((a, b) => (a.date < b.date ? 1 : -1))) {
     const cat = s.categories.find((c) => c.id === t.categoryId)?.name ?? "";
+    const cur = t.currency ?? s.currency;
+    const rate = t.exchangeRate ?? 1;
+    const base = typeof t.baseAmount === "number" ? t.baseAmount : t.amount;
     lines.push(
-      [t.kind === "income" ? "إيراد" : "مصروف", t.date, t.note || cat, cat, personName(t.personId), walletName(t.walletId), t.kind === "income" ? "داخل" : "خارج", t.amount]
+      [
+        t.kind === "income" ? "إيراد" : "مصروف",
+        t.date,
+        t.note || cat,
+        cat,
+        personName(t.personId),
+        walletName(t.walletId),
+        t.kind === "income" ? "داخل" : "خارج",
+        t.amount,
+        cur,
+        rate,
+        base,
+      ]
         .map(csvCell)
         .join(","),
     );
   }
   for (const tr of s.transfers) {
     lines.push(
-      ["تحويل", tr.date, tr.note || "تحويل", `${walletName(tr.fromId)} ← ${walletName(tr.toId)}`, "", walletName(tr.fromId), "خارج", tr.amount]
+      ["تحويل", tr.date, tr.note || "تحويل", `${walletName(tr.fromId)} ← ${walletName(tr.toId)}`, "", walletName(tr.fromId), "خارج", tr.amount, s.currency, 1, tr.amount]
         .map(csvCell)
         .join(","),
     );
   }
   for (const d of s.debts) {
     lines.push(
-      ["دين", d.dueDate, d.title, d.direction === "receivable" ? "لي" : "عليّ", personName(d.personId), "", d.direction === "receivable" ? "لي" : "عليّ", d.principal]
+      ["دين", d.dueDate, d.title, d.direction === "receivable" ? "لي" : "عليّ", personName(d.personId), "", d.direction === "receivable" ? "لي" : "عليّ", d.principal, s.currency, 1, d.principal]
         .map(csvCell)
         .join(","),
     );
   }
-  download(new Blob([`\uFEFF${lines.join("\n")}`], { type: "text/csv;charset=utf-8" }), "mizan.csv");
+  downloadExportBlob(new Blob([`\uFEFF${lines.join("\n")}`], { type: "text/csv;charset=utf-8" }), "mizan.csv");
 }
 
 export function importData(text: string) {
-  const raw = JSON.parse(text) as Record<string, unknown>;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("ملف JSON غير صالح");
+  }
+  if (isEncryptedBackupEnvelope(raw)) {
+    throw new Error("النسخة مشفّرة — أدخل كلمة مرور فك التشفير للاستيراد");
+  }
+  const validation = validateBackupJsonObject(raw);
+  if (!validation.ok) {
+    throw new Error(validation.error);
+  }
   const parsed = asData(raw);
-  if (!parsed) throw new Error("bad");
+  if (!parsed) throw new Error("تعذّر قراءة بنية الدفتر");
   useFinance.getState().replaceAll({ ...parsed, demo: false }, Date.now());
-  return raw;
+  return raw as Record<string, unknown>;
 }
 
-export async function importDataAsync(text: string) {
-  const raw = importData(text);
+export async function importDataAsync(text: string, passphrase?: string) {
+  let rawObj: unknown;
+  try {
+    rawObj = JSON.parse(text);
+  } catch {
+    throw new Error("ملف JSON غير صالح");
+  }
+  let plainText = text;
+  if (isEncryptedBackupEnvelope(rawObj)) {
+    if (!passphrase?.trim()) {
+      throw new Error("هذه النسخة مشفّرة — يلزم إدخال كلمة مرور فك التشفير");
+    }
+    plainText = await decryptBackupPayload(rawObj, passphrase.trim());
+  }
+  const raw = importData(plainText);
   const receipts = raw?.receipts;
   if (receipts && typeof receipts === "object" && !Array.isArray(receipts)) {
     await importAllReceipts(receipts as Record<string, string>);
   }
+  return raw;
 }

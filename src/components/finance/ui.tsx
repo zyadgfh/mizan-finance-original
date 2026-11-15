@@ -1,10 +1,12 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
-import { money } from "@/lib/finance/logic";
+import { useI18n } from "@/lib/finance/i18n";
+import { currencySymbol, money } from "@/lib/finance/logic";
+import { maskPersonName, useSecuritySettings } from "@/lib/finance/security";
 import type { Currency } from "@/lib/finance/types";
 import { prefersReducedMotion } from "./motion-utils";
 
@@ -15,21 +17,41 @@ export function Amount({
   currency,
   sign = "none",
   className,
+  unmasked = false,
 }: {
   value: number;
   currency: Currency;
   sign?: "auto" | "plus" | "minus" | "none";
   className?: string;
+  unmasked?: boolean;
 }) {
+  const { hideAmounts } = useSecuritySettings();
+  const { lang, numeralStyle } = useI18n();
   const neg = sign === "minus" || (sign === "auto" && value < 0);
   const pos = sign === "plus" || (sign === "auto" && value > 0);
   const tone = neg ? "text-expense" : pos ? "text-income" : "text-label";
+  if (hideAmounts && !unmasked) {
+    return (
+      <span
+        dir="ltr"
+        className={cn("num whitespace-nowrap", tone, className)}
+        aria-label={lang === "en" ? "Hidden amount" : "مبلغ مخفي"}
+      >
+        •••• {currencySymbol(currency, lang)}
+      </span>
+    );
+  }
   return (
     <span dir="ltr" className={cn("num whitespace-nowrap", tone, className)}>
       {neg ? "−" : pos ? "+" : ""}
-      {money(value, currency)}
+      {money(value, currency, numeralStyle, lang)}
     </span>
   );
+}
+
+export function PersonName({ name, className }: { name: string; className?: string }) {
+  const { hidePeopleNames } = useSecuritySettings();
+  return <span className={className}>{maskPersonName(name, hidePeopleNames)}</span>;
 }
 
 export function Section({
@@ -81,14 +103,16 @@ export function Row({
   onClick,
   destructive,
 }: {
-  title: string;
-  sub?: string;
+  title: ReactNode;
+  sub?: ReactNode;
   leading?: ReactNode;
   trailing?: ReactNode;
   chevron?: boolean;
   onClick?: () => void;
   destructive?: boolean;
 }) {
+  const { isRtl } = useI18n();
+  const Chevron = isRtl ? ChevronLeft : ChevronRight;
   const inner = (
     <>
       {leading}
@@ -101,7 +125,7 @@ export function Row({
           {trailing}
         </span>
       ) : null}
-      {chevron ? <ChevronLeft className="shrink-0 text-label-3" size={18} strokeWidth={2} aria-hidden /> : null}
+      {chevron ? <Chevron className="shrink-0 text-label-3" size={18} strokeWidth={2} aria-hidden /> : null}
     </>
   );
   const cls = "flex min-h-11 min-w-0 w-full items-center gap-3 overflow-hidden px-4 py-2 text-start";
@@ -294,6 +318,7 @@ export function Sheet({
   children: ReactNode;
   trailing?: ReactNode;
 }) {
+  const { t, dir } = useI18n();
   const [shown, setShown] = useState(false);
   const drag = useRef(false);
   const dyRef = useRef(0);
@@ -368,49 +393,52 @@ export function Sheet({
     >
       <Dialog.Portal container={container ?? undefined}>
         <Dialog.Overlay ref={overlay} className="absolute inset-0 z-40 bg-black/40" />
-        <Dialog.Content
-          ref={panel}
-          className="sheet-panel absolute inset-x-0 bottom-0 z-50 flex flex-col outline-none"
-          onOpenAutoFocus={(e) => e.preventDefault()}
-        >
-          <div
-            className="flex touch-none justify-center pt-2"
-            onPointerDown={(e) => {
-              drag.current = true;
-              e.currentTarget.setPointerCapture(e.pointerId);
-              e.currentTarget.dataset.y = String(e.clientY);
-            }}
-            onPointerMove={(e) => {
-              if (!drag.current) return;
-              const start = Number(e.currentTarget.dataset.y || e.clientY);
-              const next = Math.max(0, e.clientY - start);
-              dyRef.current = next;
-              updateDrag(next);
-            }}
-            onPointerUp={() => {
-              drag.current = false;
-              if (dyRef.current > 90) close();
-              else settleDrag();
-              dyRef.current = 0;
-            }}
-            onPointerCancel={() => {
-              drag.current = false;
-              dyRef.current = 0;
-              settleDrag();
-            }}
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-end justify-center lg:items-center lg:p-6">
+          <Dialog.Content
+            ref={panel}
+            dir={dir}
+            className="sheet-panel pointer-events-auto flex w-full flex-col outline-none lg:max-h-[85vh] lg:max-w-lg lg:rounded-card lg:shadow-2xl"
+            onOpenAutoFocus={(e) => e.preventDefault()}
           >
-            <div className="h-1.5 w-9 rounded-pill bg-separator" />
-          </div>
-          <div className="flex items-center justify-between px-4 pb-2 pt-1">
-            <button type="button" onClick={close} className="min-h-11 min-w-11 text-body text-tint">
-              إلغاء
-            </button>
-            <Dialog.Title className="text-headline font-semibold">{title}</Dialog.Title>
-            <div className="flex min-w-11 justify-end">{trailing}</div>
-          </div>
-          <Dialog.Description className="sr-only">{description}</Dialog.Description>
-          <div className="min-h-0 flex-1 overflow-y-auto pb-8">{children}</div>
-        </Dialog.Content>
+            <div
+              className="flex touch-none justify-center pt-2 lg:hidden"
+              onPointerDown={(e) => {
+                drag.current = true;
+                e.currentTarget.setPointerCapture(e.pointerId);
+                e.currentTarget.dataset.y = String(e.clientY);
+              }}
+              onPointerMove={(e) => {
+                if (!drag.current) return;
+                const start = Number(e.currentTarget.dataset.y || e.clientY);
+                const next = Math.max(0, e.clientY - start);
+                dyRef.current = next;
+                updateDrag(next);
+              }}
+              onPointerUp={() => {
+                drag.current = false;
+                if (dyRef.current > 90) close();
+                else settleDrag();
+                dyRef.current = 0;
+              }}
+              onPointerCancel={() => {
+                drag.current = false;
+                dyRef.current = 0;
+                settleDrag();
+              }}
+            >
+              <div className="h-1.5 w-9 rounded-pill bg-separator" />
+            </div>
+            <div className="flex items-center justify-between px-4 pb-2 pt-2">
+              <button type="button" onClick={close} className="min-h-11 min-w-11 text-body text-tint">
+                {t("cancel")}
+              </button>
+              <Dialog.Title className="text-headline font-semibold">{title}</Dialog.Title>
+              <div className="flex min-w-11 justify-end">{trailing}</div>
+            </div>
+            <Dialog.Description className="sr-only">{description}</Dialog.Description>
+            <div className="min-h-0 flex-1 overflow-y-auto pb-8">{children}</div>
+          </Dialog.Content>
+        </div>
       </Dialog.Portal>
     </Dialog.Root>
   );

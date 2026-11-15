@@ -3,6 +3,8 @@ package com.mizan.finance;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.util.Base64;
+import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 import androidx.activity.OnBackPressedCallback;
@@ -46,18 +48,17 @@ public class MainActivity extends BridgeActivity {
     }
 
     private final class MizanNativeBridge {
-        @JavascriptInterface
-        public boolean shareFile(String filename, String mimeType, String content) {
+        private boolean dispatchShareBytes(String filename, String mimeType, byte[] bytes) {
             try {
                 String safeName = (filename == null || filename.trim().isEmpty())
-                    ? "mizan-export.txt"
+                    ? "mizan-export.bin"
                     : new File(filename).getName().replaceAll("[^a-zA-Z0-9._-]", "_");
                 String safeMime = (mimeType == null || mimeType.trim().isEmpty())
                     ? "application/octet-stream"
                     : mimeType;
                 File outFile = new File(getCacheDir(), safeName);
                 try (FileOutputStream out = new FileOutputStream(outFile)) {
-                    out.write((content == null ? "" : content).getBytes(StandardCharsets.UTF_8));
+                    out.write(bytes);
                 }
                 Uri uri = FileProvider.getUriForFile(
                     MainActivity.this,
@@ -76,6 +77,34 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception e) {
                 return false;
             }
+        }
+
+        @JavascriptInterface
+        public boolean shareFile(String filename, String mimeType, String content) {
+            byte[] bytes = (content == null ? "" : content).getBytes(StandardCharsets.UTF_8);
+            return dispatchShareBytes(filename, mimeType, bytes);
+        }
+
+        @JavascriptInterface
+        public boolean shareBinaryFile(String filename, String mimeType, String base64Content) {
+            try {
+                byte[] bytes = Base64.decode(base64Content == null ? "" : base64Content, Base64.DEFAULT);
+                return dispatchShareBytes(filename, mimeType, bytes);
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean setScreenSecure(boolean secure) {
+            runOnUiThread(() -> {
+                if (secure) {
+                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                } else {
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                }
+            });
+            return true;
         }
     }
 }

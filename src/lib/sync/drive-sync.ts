@@ -15,25 +15,56 @@ export type DriveSyncAdapter = {
   write: (record: DriveSyncRecord, expectedRevision?: string) => Promise<{ revision?: string }>;
 };
 
-export type SyncPhase = "idle" | "syncing" | "synced" | "error";
-export type SyncErrorCode = "network" | "unauthorized" | "invalid-remote" | "conflict" | "unknown";
+export type SyncPhase = "idle" | "syncing" | "synced" | "conflict" | "error";
+export type SyncErrorCode =
+  | "network"
+  | "unauthorized"
+  | "invalid-remote"
+  | "conflict"
+  | "encrypted"
+  | "wrong-passphrase"
+  | "unknown";
+
+export type RecordCounts = {
+  txCount: number;
+  debtCount: number;
+  peopleCount: number;
+  goalCount: number;
+};
+
+export type SyncConflictInfo = {
+  reason: "remote-newer" | "revision-conflict";
+  localUpdatedAt: number;
+  remoteUpdatedAt: number;
+  localCounts: RecordCounts;
+  remoteCounts: RecordCounts;
+  remoteData: Data;
+  remoteRevision?: string;
+  explanation: string;
+};
 
 export type SyncState = {
   phase: SyncPhase;
   errorCode?: SyncErrorCode;
   message?: string;
   lastSyncedAt?: number;
+  conflict?: SyncConflictInfo;
 };
 
 export type SyncResult = {
   data: Data;
-  source: "local" | "remote" | "uploaded" | "local-fallback";
+  source: "local" | "remote" | "uploaded" | "conflict" | "local-fallback";
   state: SyncState;
   remoteUpdatedAt?: number;
+  conflict?: SyncConflictInfo;
+};
+
+export type SyncOptions = {
+  conflictMode?: "auto" | "prompt" | "force-local";
 };
 
 export type DriveSyncController = {
-  sync: (local: Data, localUpdatedAt: number) => Promise<SyncResult>;
+  sync: (local: Data, localUpdatedAt: number, options?: SyncOptions) => Promise<SyncResult>;
   getState: () => SyncState;
   subscribe: (listener: (state: SyncState) => void) => () => void;
 };
@@ -65,8 +96,23 @@ export function isDriveSyncRecord(value: unknown): value is DriveSyncRecord {
   return record.version === SYNC_VERSION && typeof record.updatedAt === "number" && isData(record.data);
 }
 
+function summarizeCounts(data: Data): RecordCounts {
+  return {
+    txCount: data.txns.length,
+    debtCount: data.debts.length,
+    peopleCount: data.people.length,
+    goalCount: data.goals.length,
+  };
+}
+
 function classifyError(error: unknown): { code: SyncErrorCode; message: string } {
   const message = error instanceof Error ? error.message : String(error ?? "Unknown sync error");
+  if (/wrong[_-]?passphrase|كلمة مرور فك التشفير غير صحيحة/i.test(message)) {
+    return { code: "wrong-passphrase", message };
+  }
+  if (/encrypted|missing[_-]?passphrase|كلمة مرور التشفير/i.test(message)) {
+    return { code: "encrypted", message };
+  }
   if (/401|403|unauthori[sz]ed|forbidden|login/i.test(message)) return { code: "unauthorized", message };
   if (/revision|conflict|412|409/i.test(message)) return { code: "conflict", message };
   if (/invalid|schema|version|payload/i.test(message)) return { code: "invalid-remote", message };
@@ -91,7 +137,36 @@ export function createDriveSyncController(adapter: DriveSyncAdapter): DriveSyncC
     return { data: local, source: "local-fallback", state: nextState };
   }
 
-  async function run(local: Data, localUpdatedAt: number): Promise<SyncResult> {
+  function conflictResult(
+    reason: SyncConflictInfo["reason"],
+    local: Data,
+    localUpdatedAt: number,
+    remote: DriveSyncRecord,
+    explanation: string,
+  ): SyncResult {
+    const conflict: SyncConflictInfo = {
+      reason,
+      localUpdatedAt,
+      remoteUpdatedAt: remote.updatedAt,
+      localCounts: summarizeCounts(local),
+      remoteCounts: summarizeCounts(remote.data),
+      remoteData: remote.data,
+      remoteRevision: remote.revision,
+      explanation,
+    };
+    const nextState: SyncState = { phase: "conflict", errorCode: "conflict", message: explanation, conflict };
+    setState(nextState);
+    return {
+      data: local,
+      source: "conflict",
+      state: nextState,
+      remoteUpdatedAt: remote.updatedAt,
+      conflict,
+    };
+  }
+
+  async function run(local: Data, localUpdatedAt: number, options: SyncOptions = {}): Promise<SyncResult> {
+    const mode = options.conflictMode ?? "auto";
     setState({ phase: "syncing" });
     try {
       const remote = await adapter.read();
@@ -111,18 +186,13 @@ export function createDriveSyncController(adapter: DriveSyncAdapter): DriveSyncC
         return { data: local, source: "uploaded", state: nextState };
       }
 
-      if (remote.updatedAt > localUpdatedAt) {
-        const nextState: SyncState = { phase: "synced", lastSyncedAt: Date.now() };
-        setState(nextState);
-        return { data: remote.data, source: "remote", state: nextState, remoteUpdatedAt: remote.updatedAt };
-      }
-
-      if (localUpdatedAt > remote.updatedAt) {
+      if (mode === "force-local") {
+        const nextTs = Math.max(localUpdatedAt, remote.updatedAt + 1, Date.now());
         await adapter.write(
           {
             ...remote,
             version: SYNC_VERSION,
-            updatedAt: localUpdatedAt,
+            updatedAt: nextTs,
             deviceId: "current-device",
             data: local,
           },
@@ -131,6 +201,54 @@ export function createDriveSyncController(adapter: DriveSyncAdapter): DriveSyncC
         const nextState: SyncState = { phase: "synced", lastSyncedAt: Date.now() };
         setState(nextState);
         return { data: local, source: "uploaded", state: nextState };
+      }
+
+      if (remote.updatedAt > localUpdatedAt) {
+        if (mode === "prompt" && localUpdatedAt > 0 && !local.demo) {
+          return conflictResult(
+            "remote-newer",
+            local,
+            localUpdatedAt,
+            remote,
+            "النسخة المحفوظة في Google Drive أحدث من تعديلات هذا الجهاز. اختر استرجاع السحابة أو تأكيد استبدالها.",
+          );
+        }
+        const nextState: SyncState = { phase: "synced", lastSyncedAt: Date.now() };
+        setState(nextState);
+        return { data: remote.data, source: "remote", state: nextState, remoteUpdatedAt: remote.updatedAt };
+      }
+
+      if (localUpdatedAt > remote.updatedAt) {
+        try {
+          await adapter.write(
+            {
+              ...remote,
+              version: SYNC_VERSION,
+              updatedAt: localUpdatedAt,
+              deviceId: "current-device",
+              data: local,
+            },
+            remote.revision,
+          );
+          const nextState: SyncState = { phase: "synced", lastSyncedAt: Date.now() };
+          setState(nextState);
+          return { data: local, source: "uploaded", state: nextState };
+        } catch (writeErr) {
+          const classified = classifyError(writeErr);
+          if (classified.code === "conflict" && mode === "prompt") {
+            const latestRemote = await adapter.read().catch(() => null);
+            if (latestRemote && isDriveSyncRecord(latestRemote)) {
+              return conflictResult(
+                "revision-conflict",
+                local,
+                localUpdatedAt,
+                latestRemote,
+                "تم تعديل النسخة السحابية من جهاز آخر أثناء المزامنة. راجع التاريخين قبل الاستبدال.",
+              );
+            }
+          }
+          throw writeErr;
+        }
       }
 
       const nextState: SyncState = { phase: "synced", lastSyncedAt: Date.now() };
@@ -142,9 +260,9 @@ export function createDriveSyncController(adapter: DriveSyncAdapter): DriveSyncC
   }
 
   return {
-    sync(local, localUpdatedAt) {
+    sync(local, localUpdatedAt, options) {
       if (!inFlight) {
-        inFlight = run(local, localUpdatedAt).finally(() => {
+        inFlight = run(local, localUpdatedAt, options).finally(() => {
           inFlight = null;
         });
       }

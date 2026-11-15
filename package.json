@@ -9,8 +9,9 @@
   },
   "scripts": {
     "dev": "node scripts/with-app-env.mjs vite dev --host 0.0.0.0 --port 8080",
-    "build": "node scripts/with-app-env.mjs vite build && npm run db:migrate",
-    "build:native": "vite build --config vite.native.config.ts",
+    "build": "node scripts/with-app-env.mjs vite build && npm run db:migrate && node scripts/check-bundle-size.mjs web",
+    "build:native": "vite build --config vite.native.config.ts && node scripts/check-bundle-size.mjs native",
+    "bundle:check": "node scripts/check-bundle-size.mjs",
     "cap:sync": "npm run build:native && npx cap sync android",
     "db:migrate": "node scripts/migrate.mjs",
     "build:dev": "node scripts/with-app-env.mjs vite build --mode development",
@@ -19,7 +20,9 @@
     "preview:stop": "node scripts/preview.mjs stop",
     "typecheck": "tsc --noEmit",
     "check:auth": "node scripts/check-auth-invariant.mjs",
-    "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/app-data/readiness-schedule.test.ts src/lib/auth/gate-identity.test.ts src/lib/auth/sign-in-gate.test.ts src/lib/preview-path-prefix.test.ts src/lib/sync/drive-sync.test.ts src/lib/sync/google-drive-gis.test.ts src/lib/notifications/tasks.test.ts src/lib/finance/finance.test.ts",
+    "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/app-data/readiness-schedule.test.ts src/lib/auth/gate-identity.test.ts src/lib/auth/sign-in-gate.test.ts src/lib/auth/better-auth-integration.test.ts src/lib/preview-path-prefix.test.ts src/lib/sync/drive-sync.test.ts src/lib/sync/google-drive-gis.test.ts src/lib/notifications/tasks.test.ts src/lib/finance/finance.test.ts src/lib/finance/enhancements.test.ts src/lib/finance/next-enhancements.test.ts && npm run test:components",
+    "test:components": "node --test scripts/component-tests.mjs",
+    "test:e2e": "node scripts/run-e2e.mjs",
     "lint": "eslint .",
     "format": "prettier --write ."
   },
@@ -89,6 +92,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.20.0",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^22.16.5",
     "@types/pg": "^8.11.10",
     "@types/react": "^19.2.0",
@@ -99,6 +103,7 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^15.15.0",
+    "happy-dom": "^21.0.4",
     "playwright": "^1.62.0",
     "prettier": "^3.4.0",
     "typescript-eslint": "^8.56.1"

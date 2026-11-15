@@ -274,6 +274,12 @@
   will-change: transform;
   transition: none;
 }
+@media (min-width: 1024px) {
+  .sheet-panel {
+    border-radius: var(--radius-card);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
+  }
+}
 .tab-bar {
   bottom: max(0.75rem, env(safe-area-inset-bottom));
 }
