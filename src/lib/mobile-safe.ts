@@ -96,3 +96,44 @@ export async function copyTextSafe(text: string): Promise<boolean> {
 
   return false;
 }
+
+let keyboardAssistInstalled = false;
+
+/**
+ * Ensures focused inputs inside sheets and standalone forms remain visible
+ * above the mobile virtual keyboard on iOS Safari & Android WebView.
+ */
+export function installMobileKeyboardScrollAssist(): void {
+  if (keyboardAssistInstalled || typeof window === "undefined" || typeof document === "undefined") {
+    return;
+  }
+  keyboardAssistInstalled = true;
+
+  document.addEventListener(
+    "focusin",
+    (e) => {
+      if (window.innerWidth > 768) return;
+      const target = e.target;
+      if (
+        !(target instanceof HTMLInputElement) &&
+        !(target instanceof HTMLTextAreaElement) &&
+        !(target instanceof HTMLSelectElement)
+      ) {
+        return;
+      }
+      if (target.type === "file" || target.type === "checkbox" || target.type === "radio") {
+        return;
+      }
+      window.setTimeout(() => {
+        try {
+          if (document.activeElement === target && typeof target.scrollIntoView === "function") {
+            target.scrollIntoView({ block: "center", behavior: "smooth" });
+          }
+        } catch {
+          /* ignore */
+        }
+      }, 280);
+    },
+    { passive: true },
+  );
+}
