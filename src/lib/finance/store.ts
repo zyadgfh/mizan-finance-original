@@ -20,7 +20,15 @@ import { writePinHash } from "./pin.ts";
 import { clearReceipts, exportAllReceipts, importAllReceipts } from "./receipts.ts";
 import { overwriteAndClearLocalKeys } from "./security.ts";
 import { seedData } from "./seed.ts";
+import {
+  diffFinanceDataToOps,
+  enqueueTenantOutboxOps,
+  tenantDataKey,
+  tenantUpdatedAtKey,
+} from "../tenant/storage.ts";
+import type { OutboxOp, TenantMode } from "../tenant/types.ts";
 import type {
+  ActorMeta,
   Budget,
   Category,
   Currency,
@@ -45,6 +53,50 @@ import type {
 const KEY = "mizan.v1";
 const UPDATED_AT_KEY = "mizan.updatedAt";
 const PENDING_SYNC_KEY = "mizan.drive.pending";
+
+export type FinanceTenantScope = {
+  tenantId: string;
+  mode: TenantMode;
+  actorId?: string;
+  actorName?: string;
+  canWrite: boolean;
+  onOpsQueued?: (ops: OutboxOp[]) => void;
+};
+
+let activeTenantScope: FinanceTenantScope | null = null;
+let lastCommittedSnapshot: Data | null = null;
+
+function currentStorageKey(): string {
+  return activeTenantScope ? tenantDataKey(activeTenantScope.tenantId) : KEY;
+}
+
+function currentUpdatedAtKey(): string {
+  return activeTenantScope ? tenantUpdatedAtKey(activeTenantScope.tenantId) : UPDATED_AT_KEY;
+}
+
+export function getActiveFinanceTenantScope(): FinanceTenantScope | null {
+  return activeTenantScope;
+}
+
+export function canWriteActiveFinanceScope(): boolean {
+  return activeTenantScope ? activeTenantScope.canWrite : true;
+}
+
+function actorMeta(existing?: ActorMeta): ActorMeta {
+  const now = Date.now();
+  if (!activeTenantScope?.actorId) {
+    return { updatedAt: now };
+  }
+  const actorId = activeTenantScope.actorId;
+  const actorName = activeTenantScope.actorName || "عضو";
+  return {
+    updatedAt: now,
+    createdBy: existing?.createdBy ?? actorId,
+    createdByName: existing?.createdByName ?? actorName,
+    updatedBy: actorId,
+    updatedByName: actorName,
+  };
+}
 
 export type TxInput = {
   id?: string;
@@ -194,13 +246,13 @@ let skipNextUpdatedAtBump = false;
 
 export function getLocalUpdatedAt(): number {
   if (typeof localStorage === "undefined") return 0;
-  const raw = Number(localStorage.getItem(UPDATED_AT_KEY) ?? "0");
+  const raw = Number(localStorage.getItem(currentUpdatedAtKey()) ?? "0");
   return Number.isFinite(raw) && raw > 0 ? raw : 0;
 }
 
 export function setLocalUpdatedAt(ts: number): void {
   if (typeof localStorage === "undefined") return;
-  localStorage.setItem(UPDATED_AT_KEY, String(Math.max(0, Math.round(ts))));
+  localStorage.setItem(currentUpdatedAtKey(), String(Math.max(0, Math.round(ts))));
 }
 
 export function getPendingCloudSync(): boolean {
@@ -264,6 +316,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       reported: input.reported !== false,
       receiptId: input.receiptId,
       createdAt: Date.now(),
+      ...actorMeta(),
     };
     set({ txns: [tx, ...state.txns.filter((t) => t.id !== id)] });
     return id;
@@ -355,6 +408,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
               personId: input.personId || undefined,
               walletId: input.walletId || "w-cash",
               receiptId: input.receiptId,
+              ...actorMeta(t),
             }
           : t,
       ),
@@ -380,6 +434,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       phone: input.phone.trim(),
       note: input.note.trim(),
       createdAt: Date.now(),
+      ...actorMeta(),
     };
     set({ people: [person, ...get().people] });
     return id;
@@ -388,7 +443,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     set({
       people: get().people.map((p) =>
         p.id === id
-          ? { ...p, name: input.name.trim(), phone: input.phone.trim(), note: input.note.trim() }
+          ? { ...p, name: input.name.trim(), phone: input.phone.trim(), note: input.note.trim(), ...actorMeta(p) }
           : p,
       ),
     });
@@ -429,6 +484,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       installments: clampInstallments(input.installments),
       cadence: input.cadence ?? "monthly",
       createdAt: Date.now(),
+      ...actorMeta(),
     };
     set({
       debts: [debt, ...get().debts],
@@ -467,6 +523,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
               dueDate: input.dueDate,
               installments: nextInstallments,
               cadence: nextCadence,
+              ...actorMeta(d),
             }
           : d,
       ),
@@ -529,6 +586,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
         source: "debt",
         reported: false,
         createdAt: Date.now(),
+        ...actorMeta(),
       };
       set({ txns: [tx, ...get().txns] });
     }
@@ -541,6 +599,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       walletId: input.linkCash ? input.walletId || "w-cash" : undefined,
       txId,
       createdAt: Date.now(),
+      ...actorMeta(),
     };
     set({
       payments: [payment, ...get().payments],
@@ -653,6 +712,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
         reported: item.reported !== false,
         receiptId: item.receiptId,
         createdAt: now + i,
+        ...actorMeta(),
       });
     }
     if (!created.length) return 0;
@@ -667,6 +727,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       kind: input.kind,
       opening: round2(Math.max(0, input.opening)),
       createdAt: Date.now(),
+      ...actorMeta(),
     };
     set({ wallets: [...get().wallets, wallet] });
     return id;
@@ -675,7 +736,13 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     set({
       wallets: get().wallets.map((w) =>
         w.id === id
-          ? { ...w, name: input.name.trim() || w.name, kind: input.kind, opening: round2(Math.max(0, input.opening)) }
+          ? {
+              ...w,
+              name: input.name.trim() || w.name,
+              kind: input.kind,
+              opening: round2(Math.max(0, input.opening)),
+              ...actorMeta(w),
+            }
           : w,
       ),
       openingBalance: id === "w-cash" ? round2(Math.max(0, input.opening)) : get().openingBalance,
@@ -704,6 +771,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       date: input.date,
       note: input.note.trim(),
       createdAt: Date.now(),
+      ...actorMeta(),
     };
     set({ transfers: [transfer, ...get().transfers] });
     return id;
@@ -726,6 +794,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       amount: round2(input.amount),
       lastMonth: "",
       createdAt: Date.now(),
+      ...actorMeta(),
     };
     set({ recurring: [row, ...get().recurring] });
     return id;
@@ -734,7 +803,14 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     set({
       recurring: get().recurring.map((r) =>
         r.id === id
-          ? { ...r, ...input, note: input.note.trim(), day: clampDay(input.day), amount: round2(input.amount) }
+          ? {
+              ...r,
+              ...input,
+              note: input.note.trim(),
+              day: clampDay(input.day),
+              amount: round2(input.amount),
+              ...actorMeta(r),
+            }
           : r,
       ),
     });
@@ -756,17 +832,18 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       source: "recurring",
       reported: true,
       createdAt: Date.now(),
+      ...actorMeta(),
     };
     set({
       txns: [tx, ...get().txns],
-      recurring: get().recurring.map((r) => (r.id === id ? { ...r, lastMonth: month } : r)),
+      recurring: get().recurring.map((r) => (r.id === id ? { ...r, lastMonth: month, ...actorMeta(r) } : r)),
     });
     return txId;
   },
   skipRecurring: (id) => {
     const month = currentMonth();
     set({
-      recurring: get().recurring.map((r) => (r.id === id ? { ...r, lastMonth: month } : r)),
+      recurring: get().recurring.map((r) => (r.id === id ? { ...r, lastMonth: month, ...actorMeta(r) } : r)),
     });
   },
   addGoal: (input) => {
@@ -779,6 +856,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       category: input.category ?? "general",
       linkedDebtId: input.linkedDebtId || undefined,
       createdAt: Date.now(),
+      ...actorMeta(),
     };
     set({ goals: [goal, ...get().goals] });
     return id;
@@ -794,6 +872,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
               deadline: input.deadline,
               category: input.category ?? g.category ?? "general",
               linkedDebtId: input.linkedDebtId !== undefined ? input.linkedDebtId || undefined : g.linkedDebtId,
+              ...actorMeta(g),
             }
           : g,
       ),
@@ -814,6 +893,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       date: input.date,
       note: input.note.trim(),
       createdAt: Date.now(),
+      ...actorMeta(),
     };
     set({ goalMoves: [move, ...get().goalMoves] });
     return id;
@@ -841,6 +921,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     const title = input.note.trim() || "فاتورة مقسّمة";
     const txns: Tx[] = [];
     const debts: Debt[] = [];
+    const meta = actorMeta();
     if (mine > 0) {
       txns.push({
         id: uid(),
@@ -853,6 +934,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
         source: "split",
         reported: true,
         createdAt: Date.now(),
+        ...meta,
       });
     }
     for (const share of shares) {
@@ -870,6 +952,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
         source: "split",
         reported: false,
         createdAt: Date.now(),
+        ...meta,
       });
       debts.push({
         id: uid(),
@@ -881,13 +964,14 @@ export const useFinance = create<Data & Actions>((set, get) => ({
         installments: 1,
         note: "من فاتورة مقسّمة",
         createdAt: Date.now(),
+        ...meta,
       });
     }
     set({ txns: [...txns, ...get().txns], debts: [...debts, ...get().debts] });
   },
   setReceiptFlag: (txId, on) => {
     set({
-      txns: get().txns.map((t) => (t.id === txId ? { ...t, receiptId: on ? txId : undefined } : t)),
+      txns: get().txns.map((t) => (t.id === txId ? { ...t, receiptId: on ? txId : undefined, ...actorMeta(t) } : t)),
     });
   },
   replaceAll: (data, remoteUpdatedAt) => {
@@ -1007,16 +1091,44 @@ function mergeCategories(categories: Category[]) {
 
 let subscribed = false;
 
-export function hydrateFinance() {
+function ensureStoreSubscription() {
   if (subscribed || typeof localStorage === "undefined") return;
+  useFinance.subscribe((s) => {
+    const snapshot = pickFinanceData(s);
+    localStorage.setItem(currentStorageKey(), JSON.stringify(snapshot));
+    if (skipNextUpdatedAtBump) {
+      skipNextUpdatedAtBump = false;
+      lastCommittedSnapshot = snapshot;
+      return;
+    }
+    setLocalUpdatedAt(Date.now());
+    setPendingCloudSync(true);
+    if (activeTenantScope && lastCommittedSnapshot) {
+      const ops = diffFinanceDataToOps(lastCommittedSnapshot, snapshot, Date.now());
+      if (ops.length > 0 && activeTenantScope.mode === "cloud") {
+        enqueueTenantOutboxOps(activeTenantScope.tenantId, ops, localStorage);
+      }
+      if (ops.length > 0) {
+        activeTenantScope.onOpsQueued?.(ops);
+      }
+    }
+    lastCommittedSnapshot = snapshot;
+  });
+  subscribed = true;
+}
+
+export function hydrateFinance() {
+  if (typeof localStorage === "undefined") return;
+  ensureStoreSubscription();
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(currentStorageKey());
     if (raw) {
       const parsed = asData(JSON.parse(raw));
       if (parsed) {
         skipNextUpdatedAtBump = true;
         useFinance.setState(parsed);
-        if (!localStorage.getItem(UPDATED_AT_KEY)) {
+        lastCommittedSnapshot = pickFinanceData(parsed);
+        if (!localStorage.getItem(currentUpdatedAtKey())) {
           setLocalUpdatedAt(parsed.demo ? 0 : Date.now());
         }
       }
@@ -1024,19 +1136,60 @@ export function hydrateFinance() {
   } catch {
     /* keep seed */
   }
-  useFinance.subscribe((s) => {
-    localStorage.setItem(KEY, JSON.stringify(pickFinanceData(s)));
-    if (skipNextUpdatedAtBump) {
-      skipNextUpdatedAtBump = false;
-      return;
-    }
-    setLocalUpdatedAt(Date.now());
-    setPendingCloudSync(true);
-  });
-  subscribed = true;
-  if (!localStorage.getItem(KEY)) {
-    localStorage.setItem(KEY, JSON.stringify(pickFinanceData(useFinance.getState())));
+  if (!localStorage.getItem(currentStorageKey())) {
+    const initial = pickFinanceData(useFinance.getState());
+    localStorage.setItem(currentStorageKey(), JSON.stringify(initial));
+    lastCommittedSnapshot = initial;
     setLocalUpdatedAt(0);
+  }
+}
+
+export function clearFinanceTenantScope() {
+  activeTenantScope = null;
+  lastCommittedSnapshot = null;
+}
+
+export function hydrateTenantFinance(scope: FinanceTenantScope, fallbackData?: Data): Data {
+  activeTenantScope = scope;
+  if (typeof localStorage === "undefined") {
+    const resolved = fallbackData ?? seedData();
+    skipNextUpdatedAtBump = true;
+    useFinance.setState(resolved);
+    lastCommittedSnapshot = pickFinanceData(resolved);
+    return resolved;
+  }
+  ensureStoreSubscription();
+
+  const key = tenantDataKey(scope.tenantId);
+  let loaded: Data | null = null;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) loaded = asData(JSON.parse(raw));
+  } catch {
+    loaded = null;
+  }
+
+  const resolved = loaded ?? fallbackData ?? seedData();
+  skipNextUpdatedAtBump = true;
+  useFinance.setState(resolved);
+  const picked = pickFinanceData(resolved);
+  lastCommittedSnapshot = picked;
+  localStorage.setItem(key, JSON.stringify(picked));
+  if (!localStorage.getItem(tenantUpdatedAtKey(scope.tenantId))) {
+    setLocalUpdatedAt(resolved.demo ? 0 : Date.now());
+  }
+  return resolved;
+}
+
+export function applySyncedTenantData(tenantId: string, mergedData: Data): void {
+  if (!activeTenantScope || activeTenantScope.tenantId !== tenantId) return;
+  skipNextUpdatedAtBump = true;
+  useFinance.setState(mergedData);
+  const picked = pickFinanceData(mergedData);
+  lastCommittedSnapshot = picked;
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(tenantDataKey(tenantId), JSON.stringify(picked));
+    setLocalUpdatedAt(Date.now());
   }
 }
 

@@ -1,10 +1,19 @@
 import {
+  AlertTriangle,
+  Building2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Cloud,
+  CloudOff,
+  Crown,
   Ellipsis,
   FileSpreadsheet,
+  HardDrive,
   House,
+  Lock,
   Plus,
+  RefreshCw,
   Scale,
   Search,
   Users,
@@ -47,7 +56,6 @@ import {
 import {
   getLocalUpdatedAt,
   getPendingCloudSync,
-  hydrateFinance,
   pickFinanceData,
   setPendingCloudSync,
   useFinance,
@@ -71,6 +79,19 @@ import {
   loadDriveSyncPrefs,
   saveDriveSyncPrefs,
 } from "@/lib/sync/google-drive-gis";
+import { TenantProvider, useTenant, type InitialTestSession } from "@/lib/tenant/context";
+import { formatRoleLabel } from "@/lib/tenant/types";
+
+const AuthScreen = lazy(() => import("@/components/finance/auth-screen").then((m) => ({ default: m.AuthScreen })));
+const WorkspaceSwitcherSheet = lazy(() =>
+  import("@/components/finance/workspace-switcher").then((m) => ({ default: m.WorkspaceSwitcherSheet })),
+);
+const TenantSettingsScreen = lazy(() =>
+  import("@/components/finance/tenant-settings-screen").then((m) => ({ default: m.TenantSettingsScreen })),
+);
+const SuperAdminScreen = lazy(() =>
+  import("@/components/finance/super-admin-screen").then((m) => ({ default: m.SuperAdminScreen })),
+);
 
 const ReportScreen = lazy(() => import("@/components/finance/features").then((m) => ({ default: m.ReportScreen })));
 const GoalsScreen = lazy(() => import("@/components/finance/features").then((m) => ({ default: m.GoalsScreen })));
@@ -120,10 +141,34 @@ const CsvImportSheet = lazy(() =>
 
 const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
-export function MizanRoot({ skipSplash = false }: { skipSplash?: boolean }) {
+export type MizanRootProps = {
+  skipSplash?: boolean;
+  requestedSlug?: string;
+  requestedInviteCode?: string;
+  initialRoute?: Route;
+  initialSession?: InitialTestSession;
+};
+
+export function MizanRoot({
+  skipSplash = false,
+  requestedSlug,
+  requestedInviteCode,
+  initialRoute,
+  initialSession,
+}: MizanRootProps) {
   return (
     <ErrorBoundary scopeName="mizan-root">
-      <App skipSplash={skipSplash} />
+      <TenantProvider
+        requestedSlug={requestedSlug}
+        requestedInviteCode={requestedInviteCode}
+        initialSession={initialSession}
+      >
+        <TenantAuthGate
+          skipSplash={skipSplash}
+          requestedInviteCode={requestedInviteCode}
+          initialRoute={initialRoute}
+        />
+      </TenantProvider>
     </ErrorBoundary>
   );
 }
@@ -148,12 +193,77 @@ function SheetFallback() {
   return null;
 }
 
-function App({ skipSplash = false }: { skipSplash?: boolean }) {
-  const { lang, numeralStyle, dir, isRtl, t } = useI18n();
+function TenantAuthGate({
+  skipSplash,
+  requestedInviteCode,
+  initialRoute,
+}: {
+  skipSplash: boolean;
+  requestedInviteCode?: string;
+  initialRoute?: Route;
+}) {
+  const { authStatus, activeTenant } = useTenant();
+  const { lang, dir } = useI18n();
   const [showSplash, setShowSplash] = useState(!skipSplash);
+
+  useIsomorphicLayoutEffect(() => {
+    markBootStart();
+    applyDocumentLanguageAndDir(lang);
+    if (skipSplash) {
+      recordBootMetrics(0);
+    }
+  }, []);
+
+  useEffect(() => {
+    applyDocumentLanguageAndDir(lang);
+  }, [lang]);
+
+  return (
+    <div dir={dir}>
+      {authStatus === "loading" ? (
+        <div className="flex min-h-dvh items-center justify-center bg-[var(--surround)] text-sub text-[var(--label-2)]">
+          {lang === "en" ? "Loading workspaces…" : "جارٍ تجهيز مساحات العمل…"}
+        </div>
+      ) : authStatus === "unauthenticated" || !activeTenant ? (
+        <Suspense fallback={<ScreenFallback />}>
+          <AuthScreen initialInviteCode={requestedInviteCode} />
+        </Suspense>
+      ) : (
+        <App initialRoute={initialRoute} />
+      )}
+
+      {showSplash ? (
+        <SplashScreen
+          onDone={(durationMs) => {
+            recordBootMetrics(durationMs);
+            setShowSplash(false);
+          }}
+        />
+      ) : null}
+
+      <Toaster position="top-center" dir={dir} offset={12} />
+    </div>
+  );
+}
+
+function App({ initialRoute }: { initialRoute?: Route }) {
+  const { lang, numeralStyle, dir, isRtl, t } = useI18n();
+  const {
+    activeTenant,
+    canWrite,
+    isSuperAdmin,
+    isOnline,
+    syncStatus,
+    pendingOpsCount,
+    rejectedSyncItems,
+    migratedLegacyNotice,
+    dismissMigratedNotice,
+    dismissRejectedSync,
+    syncNow,
+  } = useTenant();
   const [tab, setTabState] = useState<Tab>("home");
   const [month, setMonth] = useState(currentMonth);
-  const [stack, setStack] = useState<Route[]>([{ name: "main" }]);
+  const [stack, setStack] = useState<Route[]>(initialRoute ? [{ name: "main" }, initialRoute] : [{ name: "main" }]);
   const [sheet, setSheet] = useState<SheetState>(null);
   const [debtFilter, setDebtFilter] = useState<DebtTabFilter>("open");
   const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState("");
@@ -164,6 +274,7 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
   const [pinHash, setPinHashState] = useState<string | null>(null);
   const [backgroundMasked, setBackgroundMasked] = useState(false);
   const lastActiveRef = useRef<number>(Date.now());
+  const prevTenantIdRef = useRef<string | null>(activeTenant?.id ?? null);
   const security = useSecuritySettings();
 
   const route = stack[stack.length - 1] ?? { name: "main" };
@@ -176,19 +287,22 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
     { id: "more", label: t("tabMore"), icon: Ellipsis },
   ];
 
+  // Reset navigation stack gracefully on tenant switch
+  useEffect(() => {
+    if (!activeTenant) return;
+    if (prevTenantIdRef.current && prevTenantIdRef.current !== activeTenant.id) {
+      setTabState("home");
+      setStack([{ name: "main" }]);
+      setQuery("");
+      setCompact(false);
+    }
+    prevTenantIdRef.current = activeTenant.id;
+  }, [activeTenant?.id, activeTenant]);
+
   useIsomorphicLayoutEffect(() => {
-    markBootStart();
     setPinHashState(readPinHash());
     applyPrivacyScreenFlag(loadSecuritySettings().hideBalancesInRecents);
-    applyDocumentLanguageAndDir(lang);
-    if (skipSplash) {
-      recordBootMetrics(0);
-    }
   }, []);
-
-  useEffect(() => {
-    applyDocumentLanguageAndDir(lang);
-  }, [lang]);
 
   useEffect(() => {
     applyPrivacyScreenFlag(security.hideBalancesInRecents);
@@ -221,7 +335,6 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
   }, [sheet, stack.length, tab]);
 
   useEffect(() => {
-    hydrateFinance();
     void scheduleAllTaskNotifications();
 
     if (typeof window !== "undefined") {
@@ -389,12 +502,41 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
   const title = heading(tab, route, people, debts, goals, lang);
 
   function openAdd() {
+    if (!canWrite) {
+      toast.info(
+        activeTenant?.subscriptionStatus === "suspended"
+          ? lang === "en"
+            ? "Workspace is suspended — export is available"
+            : "المساحة موقوفة مؤقتًا — التصدير متاح"
+          : lang === "en"
+            ? "Viewer role is read-only"
+            : "صلاحية مشاهد (Viewer) للقراءة فقط",
+      );
+      return;
+    }
     if (tab === "debts") setSheet({ kind: "debt" });
     else if (tab === "people") setSheet({ kind: "person" });
     else setSheet({ kind: "txn" });
   }
 
-  const showAdd = route.name === "main" && tab !== "more";
+  function guardedOpenSheet(next: Exclude<SheetState, null>) {
+    const readOnlyAllowed = next.kind === "search" || next.kind === "workspace-switcher";
+    if (!canWrite && !readOnlyAllowed) {
+      toast.info(
+        activeTenant?.subscriptionStatus === "suspended"
+          ? lang === "en"
+            ? "Workspace is suspended — editing disabled"
+            : "المساحة موقوفة — التعديل غير متاح"
+          : lang === "en"
+            ? "Read-only permission (Viewer)"
+            : "صلاحيتك في هذه المساحة للقراءة فقط",
+      );
+      return;
+    }
+    setSheet(next);
+  }
+
+  const showAdd = route.name === "main" && tab !== "more" && canWrite;
   const locked = Boolean(pinHash) && !unlocked;
   const BackChevron = isRtl ? ChevronRight : ChevronLeft;
 
@@ -416,6 +558,8 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
         openNotifications: () => pushRoute({ name: "notifications" }),
         openDrive: () => pushRoute({ name: "drive" }),
         openSecurity: () => pushRoute({ name: "security" }),
+        openTenant: () => pushRoute({ name: "tenant" }),
+        openAdmin: () => pushRoute({ name: "admin" }),
         openDebtsFiltered,
         openLedgerFiltered,
         debtFilter,
@@ -424,7 +568,7 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
         setLedgerCategoryFilter,
         back,
         sheet,
-        openSheet: setSheet,
+        openSheet: guardedOpenSheet,
         closeSheet: () => setSheet(null),
         query,
         setQuery,
@@ -457,7 +601,36 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
                   </div>
                 </div>
 
-                <nav className="mt-5 space-y-1" aria-label={lang === "en" ? "Primary Sections" : "الأقسام الرئيسية"}>
+                {activeTenant ? (
+                  <button
+                    type="button"
+                    onClick={() => setSheet({ kind: "workspace-switcher" })}
+                    className="mt-3 flex w-full items-center justify-between gap-2 rounded-cell border border-separator/70 bg-fill/70 px-3 py-2 text-start hover:bg-fill"
+                    aria-label={lang === "en" ? "Switch Workspace" : "تبديل مساحة العمل"}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 text-sub font-bold text-label truncate">
+                        {activeTenant.mode === "cloud" ? (
+                          <Cloud size={14} className="text-tint shrink-0" />
+                        ) : (
+                          <HardDrive size={14} className="text-warn shrink-0" />
+                        )}
+                        <span className="truncate">{activeTenant.name}</span>
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-caption text-label-2">
+                        <span>{formatRoleLabel(activeTenant.role, lang)}</span>
+                        {!isOnline ? (
+                          <span>· {lang === "en" ? "Offline" : "أوفلاين"}</span>
+                        ) : pendingOpsCount > 0 ? (
+                          <span>· {pendingOpsCount} {lang === "en" ? "queued" : "بانتظار المزامنة"}</span>
+                        ) : null}
+                      </div>
+                    </div>
+                    <ChevronDown size={15} className="text-label-2 shrink-0" />
+                  </button>
+                ) : null}
+
+                <nav className="mt-4 space-y-1" aria-label={lang === "en" ? "Primary Sections" : "الأقسام الرئيسية"}>
                   {tabs.map((item) => {
                     const on = tab === item.id && route.name === "main";
                     const Icon = item.icon;
@@ -489,28 +662,50 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
               <div className="space-y-2 border-t border-separator/50 pt-4">
                 <button
                   type="button"
+                  onClick={() => pushRoute({ name: "tenant" })}
+                  className="flex min-h-10 w-full items-center gap-2.5 rounded-cell bg-fill px-3 text-sub font-medium text-label"
+                >
+                  <Building2 size={16} aria-hidden />
+                  <span>{lang === "en" ? "Workspace & Members" : "المساحة والأعضاء"}</span>
+                </button>
+                {isSuperAdmin ? (
+                  <button
+                    type="button"
+                    onClick={() => pushRoute({ name: "admin" })}
+                    className="flex min-h-10 w-full items-center gap-2.5 rounded-cell bg-tint/12 px-3 text-sub font-semibold text-tint"
+                  >
+                    <Crown size={16} aria-hidden />
+                    <span>{lang === "en" ? "Super-Admin" : "لوحة المنصة"}</span>
+                  </button>
+                ) : null}
+                <button
+                  type="button"
                   onClick={() => setSheet({ kind: "search" })}
                   className="flex min-h-10 w-full items-center gap-2.5 rounded-cell bg-fill px-3 text-sub font-medium text-label"
                 >
                   <Search size={16} aria-hidden />
                   <span>{t("search")}</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setSheet({ kind: "csv-import" })}
-                  className="flex min-h-10 w-full items-center gap-2.5 rounded-cell bg-fill px-3 text-sub font-medium text-label"
-                >
-                  <FileSpreadsheet size={16} aria-hidden />
-                  <span>{t("importCsv")}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={openAdd}
-                  className="flex min-h-11 w-full items-center justify-center gap-2 rounded-pill bg-tint px-4 text-sub font-semibold text-on-tint shadow-sm"
-                >
-                  <Plus size={17} aria-hidden />
-                  <span>{t("add")}</span>
-                </button>
+                {canWrite ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => guardedOpenSheet({ kind: "csv-import" })}
+                      className="flex min-h-10 w-full items-center gap-2.5 rounded-cell bg-fill px-3 text-sub font-medium text-label"
+                    >
+                      <FileSpreadsheet size={16} aria-hidden />
+                      <span>{t("importCsv")}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openAdd}
+                      className="flex min-h-11 w-full items-center justify-center gap-2 rounded-pill bg-tint px-4 text-sub font-semibold text-on-tint shadow-sm"
+                    >
+                      <Plus size={17} aria-hidden />
+                      <span>{t("add")}</span>
+                    </button>
+                  </>
+                ) : null}
               </div>
             </aside>
           ) : null}
@@ -553,25 +748,59 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
                         </button>
                       )}
                     </div>
-                    <p className="truncate text-headline font-semibold">
-                      {compact || route.name !== "main" ? title : ""}
-                    </p>
-                    <div className="flex min-w-11 justify-end">
+
+                    {route.name === "main" && !compact && activeTenant ? (
+                      <button
+                        type="button"
+                        onClick={() => setSheet({ kind: "workspace-switcher" })}
+                        className="flex max-w-[60%] items-center gap-1.5 rounded-pill bg-fill/90 px-3 py-1.5 text-caption font-semibold text-label lg:hidden"
+                      >
+                        {!isOnline ? (
+                          <CloudOff size={13} className="text-warn shrink-0" />
+                        ) : syncStatus === "syncing" ? (
+                          <RefreshCw size={13} className="animate-spin text-tint shrink-0" />
+                        ) : activeTenant.mode === "cloud" ? (
+                          <Cloud size={13} className="text-tint shrink-0" />
+                        ) : (
+                          <HardDrive size={13} className="text-warn shrink-0" />
+                        )}
+                        <span className="truncate">{activeTenant.name}</span>
+                        <ChevronDown size={13} className="text-label-2 shrink-0" />
+                      </button>
+                    ) : (
+                      <p className="truncate text-headline font-semibold">
+                        {compact || route.name !== "main" ? title : ""}
+                      </p>
+                    )}
+
+                    <div className="flex min-w-11 justify-end items-center gap-1">
+                      {activeTenant?.mode === "cloud" && pendingOpsCount > 0 && isOnline ? (
+                        <button
+                          type="button"
+                          onClick={() => void syncNow()}
+                          className="hidden sm:inline-flex items-center gap-1 rounded-pill bg-fill px-2.5 py-1 text-caption font-semibold text-tint"
+                          title={lang === "en" ? "Sync pending changes" : "مزامنة التغييرات"}
+                        >
+                          <RefreshCw size={12} className={syncStatus === "syncing" ? "animate-spin" : ""} />
+                          <span>{pendingOpsCount}</span>
+                        </button>
+                      ) : null}
+
                       {showAdd ? (
                         <PillButton onClick={openAdd}>{t("add")}</PillButton>
-                      ) : route.name === "person" ? (
+                      ) : route.name === "person" && canWrite ? (
                         <button
                           type="button"
                           className="min-h-11 px-3 text-body text-tint"
-                          onClick={() => setSheet({ kind: "person", id: route.id })}
+                          onClick={() => guardedOpenSheet({ kind: "person", id: route.id })}
                         >
                           {t("edit")}
                         </button>
-                      ) : route.name === "goal" ? (
+                      ) : route.name === "goal" && canWrite ? (
                         <button
                           type="button"
                           className="min-h-11 px-3 text-body text-tint"
-                          onClick={() => setSheet({ kind: "goal", id: route.id })}
+                          onClick={() => guardedOpenSheet({ kind: "goal", id: route.id })}
                         >
                           {t("edit")}
                         </button>
@@ -580,17 +809,66 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
                       )}
                     </div>
                   </div>
+
+                  {/* Multi-Tenant Read-Only / Rejected / Migration Banners */}
+                  {!canWrite ? (
+                    <div className="mx-3 mb-2 flex items-center justify-between gap-2 rounded-cell bg-warn/15 px-3 py-2 text-caption font-semibold text-label">
+                      <span className="flex items-center gap-1.5">
+                        <Lock size={14} className="text-warn shrink-0" />
+                        {activeTenant?.subscriptionStatus === "suspended"
+                          ? lang === "en"
+                            ? "Workspace is suspended — view & export only"
+                            : "هذه المساحة موقوفة مؤقتًا — العرض والتصدير متاحان فقط"
+                          : lang === "en"
+                            ? "Viewer access — read-only workspace"
+                            : "صلاحيتك في هذه المساحة «مشاهد» (للقراءة فقط)"}
+                      </span>
+                    </div>
+                  ) : null}
+
+                  {rejectedSyncItems.length > 0 ? (
+                    <div className="mx-3 mb-2 flex items-center justify-between gap-2 rounded-cell bg-expense/15 px-3 py-2 text-caption text-label">
+                      <button
+                        type="button"
+                        onClick={() => pushRoute({ name: "tenant" })}
+                        className="flex items-center gap-1.5 font-semibold text-expense text-start"
+                      >
+                        <AlertTriangle size={14} className="shrink-0" />
+                        <span>
+                          {lang === "en"
+                            ? `${rejectedSyncItems.length} offline edits rejected by server permissions`
+                            : `تم رفض ${rejectedSyncItems.length} تعديلات أوفلاين من الخادم`}
+                        </span>
+                      </button>
+                      <button type="button" onClick={dismissRejectedSync} className="underline shrink-0">
+                        {lang === "en" ? "Dismiss" : "إخفاء"}
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {migratedLegacyNotice ? (
+                    <div className="mx-3 mb-2 flex items-center justify-between gap-2 rounded-cell bg-tint/12 px-3 py-2 text-caption text-label">
+                      <span>
+                        {lang === "en"
+                          ? "Previous local ledger was migrated into this personal workspace."
+                          : "تم نقل بياناتك المحلية السابقة تلقائيًا إلى مساحتك الشخصية."}
+                      </span>
+                      <button type="button" onClick={dismissMigratedNotice} className="font-semibold text-tint underline">
+                        {lang === "en" ? "OK" : "حسناً"}
+                      </button>
+                    </div>
+                  ) : null}
                 </header>
 
                 <ErrorBoundary
-                  key={`eb:${tab}:${route.name}:${"id" in route ? route.id : ""}`}
+                  key={`eb:${activeTenant?.id}:${tab}:${route.name}:${"id" in route ? route.id : ""}`}
                   scopeName="screen"
                   routeName={route.name}
                   tabName={tab}
                   onGoHome={() => setTab("home")}
                 >
                   <Suspense fallback={<ScreenFallback />}>
-                    <MotionScreen motionKey={`${tab}:${route.name}:${"id" in route ? route.id : ""}`}>
+                    <MotionScreen motionKey={`${activeTenant?.id}:${tab}:${route.name}:${"id" in route ? route.id : ""}`}>
                       {route.name === "person" ? (
                         <PersonScreen id={route.id} />
                       ) : route.name === "debt" ? (
@@ -611,6 +889,10 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
                         <DriveSyncScreen />
                       ) : route.name === "security" ? (
                         <SecurityScreen />
+                      ) : route.name === "tenant" ? (
+                        <TenantSettingsScreen />
+                      ) : route.name === "admin" ? (
+                        <SuperAdminScreen />
                       ) : tab === "home" ? (
                         <HomeScreen />
                       ) : tab === "ledger" ? (
@@ -680,6 +962,9 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
 
           <ErrorBoundary scopeName="sheet" routeName={sheet?.kind} onGoHome={() => setSheet(null)}>
             <Suspense fallback={<SheetFallback />}>
+              {sheet?.kind === "workspace-switcher" ? (
+                <WorkspaceSwitcherSheet open={true} onClose={() => setSheet(null)} />
+              ) : null}
               {sheet?.kind === "txn" ? (
                 <TxnForm
                   key={`${sheet.id ?? "new-tx"}-${sheet.prefill?.kind ?? "none"}-${sheet.prefill?.note ?? ""}`}
@@ -708,17 +993,6 @@ function App({ skipSplash = false }: { skipSplash?: boolean }) {
               {sheet?.kind === "csv-import" ? <CsvImportSheet /> : null}
             </Suspense>
           </ErrorBoundary>
-
-          {showSplash ? (
-            <SplashScreen
-              onDone={(durationMs) => {
-                recordBootMetrics(durationMs);
-                setShowSplash(false);
-              }}
-            />
-          ) : null}
-
-          <Toaster position="top-center" dir={dir} offset={12} />
         </div>
       </div>
     </MizanContext.Provider>
@@ -743,6 +1017,8 @@ function heading(
   if (route.name === "notifications") return lang === "en" ? "Notifications & Tasks" : "الإشعارات والمهام";
   if (route.name === "drive") return lang === "en" ? "Google Drive Sync" : "مزامنة Google Drive";
   if (route.name === "security") return lang === "en" ? "Security & Privacy" : "الأمان والخصوصية";
+  if (route.name === "tenant") return lang === "en" ? "Workspace & Members" : "المساحة والأعضاء";
+  if (route.name === "admin") return lang === "en" ? "Platform Admin" : "لوحة المنصة";
   if (tab === "home") return lang === "en" ? "Today" : "اليوم";
   if (tab === "ledger") return lang === "en" ? "Ledger" : "السجل";
   if (tab === "debts") return lang === "en" ? "Debts" : "الديون";

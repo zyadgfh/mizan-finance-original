@@ -230,7 +230,22 @@ export function overwriteAndClearLocalKeys(
 ): void {
   if (!storage) return;
   const zeroPad = "0".repeat(256);
-  for (const key of MIZAN_LOCAL_STORAGE_KEYS) {
+  const dynamicKeys: string[] = [];
+  for (let i = 0; i < storage.length; i += 1) {
+    const k = storage.key(i);
+    if (!k) continue;
+    if (
+      k.startsWith("mizan.tenant.") ||
+      k.startsWith("mizan.user.") ||
+      k.startsWith("mizan.auth.") ||
+      k === "mizan.migratedToTenant.v1" ||
+      k === "mizan.supabase.auth.v1"
+    ) {
+      dynamicKeys.push(k);
+    }
+  }
+  const allKeys = [...new Set([...MIZAN_LOCAL_STORAGE_KEYS, ...dynamicKeys])];
+  for (const key of allKeys) {
     try {
       if (storage.getItem(key) !== null) {
         storage.setItem(key, zeroPad);

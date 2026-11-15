@@ -93,6 +93,19 @@ defineGlobal(
   },
 );
 
+const stubFetch = async (input) => {
+  const url = typeof input === "string" ? input : input?.url ?? "";
+  if (url.includes("supabase.co")) {
+    return new Response(JSON.stringify([]), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  throw new Error(`Unexpected fetch in component test: ${url}`);
+};
+win.fetch = stubFetch;
+defineGlobal("fetch", stubFetch);
+
 const React = await import("react");
 const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { createServer } = await import("vite");
@@ -136,16 +149,59 @@ test.before(async () => {
 
 test.after(async () => {
   cleanup();
+  try {
+    const { getSupabaseClient } = await viteServer.ssrLoadModule("/src/lib/supabase/client.ts");
+    await getSupabaseClient().auth.stopAutoRefresh();
+  } catch {
+    /* ignore */
+  }
   if (viteServer) await viteServer.close();
+  try {
+    await win.happyDOM?.abort();
+  } catch {
+    /* ignore */
+  }
   await win.close();
 });
 
-test.afterEach(() => {
+test.afterEach(async () => {
   cleanup();
+  const { clearFinanceTenantScope } = await viteServer.ssrLoadModule("/src/lib/finance/store.ts");
+  clearFinanceTenantScope();
   win.localStorage.clear();
+  win.sessionStorage.clear();
   win.document.documentElement.lang = "ar";
   win.document.documentElement.dir = "rtl";
 });
+
+function makeTestSession(overrides = {}) {
+  const defaultTenant = {
+    id: "t-personal-1",
+    slug: "personal",
+    name: "مساحتي الشخصية",
+    kind: "personal",
+    baseCurrency: "EGP",
+    openingBalance: 1000,
+    role: "owner",
+    mode: "cloud",
+    planCode: "monthly",
+    subscriptionStatus: "trialing",
+    trialEndsAt: new Date(Date.now() + 86_400_000 * 14).toISOString(),
+    currentPeriodEnd: new Date(Date.now() + 86_400_000 * 14).toISOString(),
+    createdAt: new Date().toISOString(),
+  };
+  return {
+    user: { id: "u-test-1", email: "zyad@mizan.test", displayName: "زياد جمال" },
+    isSuperAdmin: false,
+    workspaces: [defaultTenant],
+    activeTenantId: defaultTenant.id,
+    plans: [
+      { code: "monthly", nameAr: "الخطة الشهرية", nameEn: "Monthly Plan", priceEgp: 19, billingInterval: "month", trialDays: 14, isActive: true },
+      { code: "yearly", nameAr: "الخطة السنوية", nameEn: "Yearly Plan", priceEgp: 149, billingInterval: "year", trialDays: 14, isActive: true },
+    ],
+    ...overrides,
+  };
+}
 
 test("SplashScreen renders Mizan SVG mark and dismisses cleanly on tap / reduced-motion", async () => {
   const { SplashScreen } = await viteServer.ssrLoadModule("/src/components/finance/splash-screen.tsx");
@@ -165,17 +221,30 @@ test("SplashScreen renders Mizan SVG mark and dismisses cleanly on tap / reduced
   });
 });
 
+test("MizanRoot renders AuthScreen when unauthenticated and supports invite code prefill", async () => {
+  const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
+  const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
+
+  updateUiPrefs({ language: "ar", numeralStyle: "latn", analyticsEnabled: true });
+  render(React.createElement(MizanRoot, { skipSplash: true, requestedInviteCode: "MZN-TEAM-2026" }));
+
+  await waitFor(() => {
+    assert.ok(screen.getByText("ميزان متعدد المساحات"));
+  });
+  const inviteInput = screen.getByPlaceholderText("MZN-XXXX-YYYY");
+  assert.equal(inviteInput.value, "MZN-TEAM-2026");
+});
+
 test("MizanRoot defaults to Arabic RTL, records boot metrics, and navigates tabs", async () => {
   const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
   const { loadPerfMetrics } = await viteServer.ssrLoadModule("/src/lib/finance/perf-metrics.ts");
   const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
-  const { useFinance } = await viteServer.ssrLoadModule("/src/lib/finance/store.ts");
   const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
 
   updateUiPrefs({ language: "ar", numeralStyle: "latn", analyticsEnabled: true });
-  useFinance.getState().replaceAll(seedData());
+  win.localStorage.setItem("mizan.tenant.t-personal-1.v1", JSON.stringify(seedData()));
 
-  render(React.createElement(MizanRoot, { skipSplash: true }));
+  render(React.createElement(MizanRoot, { skipSplash: true, initialSession: makeTestSession() }));
   assert.equal(win.document.documentElement.lang, "ar");
   assert.equal(win.document.documentElement.dir, "rtl");
   assert.ok(screen.getAllByText("اليوم").length >= 1);
@@ -199,14 +268,15 @@ test("MizanRoot defaults to Arabic RTL, records boot metrics, and navigates tabs
 test("HomeScreen shows on-device analytics and respects explicit opt-out toggle", async () => {
   const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
   const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
-  const { useFinance } = await viteServer.ssrLoadModule("/src/lib/finance/store.ts");
   const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
 
   updateUiPrefs({ language: "ar", numeralStyle: "latn", analyticsEnabled: true });
-  useFinance.getState().replaceAll(seedData());
+  win.localStorage.setItem("mizan.tenant.t-personal-1.v1", JSON.stringify(seedData()));
 
-  render(React.createElement(MizanRoot, { skipSplash: true }));
-  assert.ok(screen.getByText("تحليلات محلية"));
+  render(React.createElement(MizanRoot, { skipSplash: true, initialSession: makeTestSession() }));
+  await waitFor(() => {
+    assert.ok(screen.getByText("تحليلات محلية"));
+  });
   assert.ok(screen.getByText("متوسط الإنفاق اليومي"));
 
   // Navigate to More and toggle analytics off
@@ -227,13 +297,12 @@ test("HomeScreen shows on-device analytics and respects explicit opt-out toggle"
 test("MoreScreen toggles English LTR and Arabic-Indic numerals live", async () => {
   const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
   const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
-  const { useFinance } = await viteServer.ssrLoadModule("/src/lib/finance/store.ts");
   const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
 
   updateUiPrefs({ language: "ar", numeralStyle: "latn", analyticsEnabled: true });
-  useFinance.getState().replaceAll(seedData());
+  win.localStorage.setItem("mizan.tenant.t-personal-1.v1", JSON.stringify(seedData()));
 
-  render(React.createElement(MizanRoot, { skipSplash: true }));
+  render(React.createElement(MizanRoot, { skipSplash: true, initialSession: makeTestSession() }));
   fireEvent.click(screen.getAllByRole("button", { name: "أكثر" })[0]);
   await waitFor(() => {
     assert.ok(screen.getByRole("tab", { name: "English" }));
@@ -249,6 +318,174 @@ test("MoreScreen toggles English LTR and Arabic-Indic numerals live", async () =
   fireEvent.click(screen.getByRole("tab", { name: /Arabic-Indic/i }));
   await waitFor(() => {
     assert.ok(screen.getAllByText(/[٠-٩]/).length >= 1);
+  });
+});
+
+test("Viewer role and suspended tenants enforce read-only banners and hide write actions", async () => {
+  const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
+  const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
+  const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
+
+  updateUiPrefs({ language: "en", numeralStyle: "latn", analyticsEnabled: true });
+  win.localStorage.setItem("mizan.tenant.t-viewer.v1", JSON.stringify(seedData()));
+
+  const viewerSession = makeTestSession({
+    workspaces: [
+      {
+        id: "t-viewer",
+        slug: "family",
+        name: "Family Ledger",
+        kind: "family",
+        baseCurrency: "EGP",
+        openingBalance: 0,
+        role: "viewer",
+        mode: "cloud",
+        planCode: "monthly",
+        subscriptionStatus: "active",
+        trialEndsAt: new Date(Date.now() + 86_400_000 * 7).toISOString(),
+        currentPeriodEnd: new Date(Date.now() + 86_400_000 * 30).toISOString(),
+        createdAt: new Date().toISOString(),
+      },
+    ],
+    activeTenantId: "t-viewer",
+  });
+
+  render(React.createElement(MizanRoot, { skipSplash: true, initialSession: viewerSession }));
+  await waitFor(() => {
+    assert.ok(screen.getByText(/Viewer access/i));
+  });
+  assert.equal(screen.queryByRole("button", { name: "Add" }), null);
+
+  cleanup();
+  win.localStorage.setItem("mizan.tenant.t-susp.v1", JSON.stringify(seedData()));
+  const suspendedSession = makeTestSession({
+    workspaces: [
+      {
+        ...viewerSession.workspaces[0],
+        id: "t-susp",
+        role: "owner",
+        subscriptionStatus: "suspended",
+      },
+    ],
+    activeTenantId: "t-susp",
+  });
+
+  render(React.createElement(MizanRoot, { skipSplash: true, initialSession: suspendedSession }));
+  await waitFor(() => {
+    assert.ok(screen.getByText(/Workspace is suspended/i));
+  });
+});
+
+test("Multi-tenant workspace switcher isolates data across workspaces and opens tenant billing & Super-Admin", async () => {
+  const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
+  const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
+  const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
+
+  updateUiPrefs({ language: "en", numeralStyle: "latn", analyticsEnabled: true });
+  const seed = seedData();
+  win.localStorage.setItem(
+    "mizan.tenant.t-one.v1",
+    JSON.stringify({
+      ...seed,
+      txns: [
+        {
+          id: "tx-t1",
+          kind: "expense",
+          amount: 111,
+          categoryId: "c-food",
+          note: "Tenant One Coffee",
+          date: seed.txns[0]?.date ?? "2026-11-14",
+          createdAt: Date.now(),
+        },
+      ],
+    }),
+  );
+  win.localStorage.setItem(
+    "mizan.tenant.t-two.v1",
+    JSON.stringify({
+      ...seed,
+      txns: [
+        {
+          id: "tx-t2",
+          kind: "expense",
+          amount: 999,
+          categoryId: "c-food",
+          note: "Tenant Two Rent",
+          date: seed.txns[0]?.date ?? "2026-11-14",
+          createdAt: Date.now(),
+        },
+      ],
+    }),
+  );
+
+  const session = makeTestSession({
+    isSuperAdmin: true,
+    workspaces: [
+      {
+        id: "t-one",
+        slug: "personal",
+        name: "Alpha Space",
+        kind: "personal",
+        baseCurrency: "EGP",
+        openingBalance: 0,
+        role: "owner",
+        mode: "cloud",
+        planCode: "monthly",
+        subscriptionStatus: "trialing",
+        trialEndsAt: new Date(Date.now() + 86_400_000 * 14).toISOString(),
+        currentPeriodEnd: new Date(Date.now() + 86_400_000 * 14).toISOString(),
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "t-two",
+        slug: "company",
+        name: "Beta Co",
+        kind: "business",
+        baseCurrency: "EGP",
+        openingBalance: 0,
+        role: "admin",
+        mode: "local",
+        planCode: "yearly",
+        subscriptionStatus: "active",
+        trialEndsAt: new Date(Date.now() + 86_400_000 * 14).toISOString(),
+        currentPeriodEnd: new Date(Date.now() + 86_400_000 * 365).toISOString(),
+        createdAt: new Date().toISOString(),
+      },
+    ],
+    activeTenantId: "t-one",
+  });
+
+  render(React.createElement(MizanRoot, { skipSplash: true, initialSession: session }));
+  fireEvent.click(screen.getAllByRole("button", { name: "Ledger" })[0]);
+  await waitFor(() => {
+    assert.ok(screen.getByText("Tenant One Coffee"));
+    assert.equal(screen.queryByText("Tenant Two Rent"), null);
+  });
+
+  // Switch workspace to Beta Co via switcher
+  fireEvent.click(screen.getByRole("button", { name: /Switch Workspace/i }));
+  const betaBtn = await screen.findByText("Beta Co");
+  fireEvent.click(betaBtn);
+
+  fireEvent.click(screen.getAllByRole("button", { name: "Ledger" })[0]);
+  await waitFor(() => {
+    assert.ok(screen.getByText("Tenant Two Rent"));
+    assert.equal(screen.queryByText("Tenant One Coffee"), null);
+  });
+
+  // Open Workspace Settings -> Plan tab shows symbolic 19 EGP / 149 EGP plans
+  fireEvent.click(screen.getByRole("button", { name: /Workspace & Members/i }));
+  const planTab = await screen.findByRole("button", { name: "Plan" });
+  fireEvent.click(planTab);
+  await waitFor(() => {
+    assert.ok(screen.getByText(/Monthly Plan/));
+    assert.ok(screen.getByText(/Yearly Plan/));
+  });
+
+  // Open Super-Admin Console (visible because isSuperAdmin=true)
+  fireEvent.click(screen.getByRole("button", { name: /Super-Admin/i }));
+  await waitFor(() => {
+    assert.ok(screen.getByText(/Platform Super-Admin/));
   });
 });
 

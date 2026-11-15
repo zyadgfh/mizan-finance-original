@@ -48,6 +48,10 @@ export function sanitizeSensitiveText(raw: string, knownPeople: string[] = []): 
     "$1=[REDACTED]",
   );
 
+  // Redact JWTs, Bearer tokens, and workspace invite codes
+  s = s.replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "[JWT]");
+  s = s.replace(/\bMZN-[A-Z0-9]{4}-[A-Z0-9]{4}\b/gi, "[INVITE_CODE]");
+
   // Redact emails and phone numbers
   s = s.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[EMAIL]");
   s = s.replace(/\+?\d[\d\s\-()]{5,}\d/g, "[NUM]");
