@@ -40,7 +40,8 @@ export type SheetState =
   | { kind: "goal-move"; goalId: string; withdraw?: boolean }
   | { kind: "pin" }
   | { kind: "wallet"; id?: string }
-  | { kind: "search" };
+  | { kind: "search" }
+  | { kind: "csv-import" };
 
 export type MizanUI = {
   tab: Tab;

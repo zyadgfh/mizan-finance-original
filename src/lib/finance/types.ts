@@ -40,6 +40,12 @@ export type Tx = {
   id: string;
   kind: TxKind;
   amount: number;
+  /** Original currency when recorded (defaults to account currency). */
+  currency?: Currency;
+  /** Frozen exchange rate into account currency at the moment of entry. */
+  exchangeRate?: number;
+  /** Frozen converted amount in account currency at the moment of entry. */
+  baseAmount?: number;
   categoryId: string;
   note: string;
   date: string;
@@ -166,6 +172,8 @@ export type Data = {
   budgets: Budget[];
   openingBalance: number;
   currency: Currency;
+  /** Reference exchange rates against account base currency (1 unit of currency = rate * base currency). */
+  exchangeRates?: Partial<Record<Currency, number>>;
   phoneCountryCode?: string;
   demo: boolean;
   wallets: Wallet[];
@@ -174,4 +182,25 @@ export type Data = {
   goals: Goal[];
   goalMoves: GoalMove[];
   debtLogs?: DebtAuditEntry[];
+};
+
+export type MonthlyAnalytics = {
+  month: string;
+  totalExpense: number;
+  totalIncome: number;
+  elapsedDays: number;
+  daysInMonth: number;
+  dailyAverageExpense: number;
+  projectedMonthEndExpense: number;
+  projectedNet: number;
+  highestSpendingDays: { date: string; amount: number; count: number }[];
+  increasedCategories: {
+    category: Category;
+    current: number;
+    previous: number;
+    delta: number;
+    pctIncrease: number;
+  }[];
+  uncategorizedCount: number;
+  uncategorizedTxIds: string[];
 };

@@ -6,7 +6,16 @@ import {
   isEncryptedBackupEnvelope,
   validateBackupJsonObject,
 } from "../sync/crypto-backup.ts";
-import { currentMonth, defaultWallets, isCurrency, round2, todayISO } from "./logic.ts";
+import {
+  currentMonth,
+  defaultExchangeRatesFor,
+  defaultWallets,
+  effectiveExchangeRate,
+  isCurrency,
+  round2,
+  round4,
+  todayISO,
+} from "./logic.ts";
 import { writePinHash } from "./pin.ts";
 import { clearReceipts, exportAllReceipts, importAllReceipts } from "./receipts.ts";
 import { overwriteAndClearLocalKeys } from "./security.ts";
@@ -41,6 +50,9 @@ export type TxInput = {
   id?: string;
   kind: TxKind;
   amount: number;
+  currency?: Currency;
+  exchangeRate?: number;
+  baseAmount?: number;
   categoryId: string;
   note: string;
   date: string;
@@ -112,7 +124,9 @@ type Actions = {
   setBudget: (categoryId: string, limit: number) => void;
   setOpening: (n: number) => void;
   setCurrency: (c: Currency) => void;
+  setExchangeRate: (currency: Currency, rate: number) => void;
   setPhoneCountryCode: (code: string) => void;
+  importTransactionsBulk: (inputs: TxInput[]) => number;
   addWallet: (input: { name: string; kind: WalletKind; opening: number }) => string;
   updateWallet: (id: string, input: { name: string; kind: WalletKind; opening: number }) => void;
   removeWallet: (id: string) => boolean;
@@ -155,6 +169,7 @@ export function pickFinanceData(s: Data): Data {
     budgets: s.budgets,
     openingBalance: s.openingBalance,
     currency: s.currency,
+    exchangeRates: s.exchangeRates,
     phoneCountryCode: s.phoneCountryCode,
     demo: s.demo,
     wallets: s.wallets,
@@ -199,14 +214,47 @@ export function setPendingCloudSync(pending: boolean): void {
   else localStorage.removeItem(PENDING_SYNC_KEY);
 }
 
+function resolveTxCurrencyFields(
+  input: Pick<TxInput, "amount" | "currency" | "exchangeRate" | "baseAmount">,
+  accountCurrency: Currency,
+  rates?: Partial<Record<Currency, number>>,
+): {
+  amount: number;
+  currency?: Currency;
+  exchangeRate?: number;
+  baseAmount?: number;
+} {
+  const amount = round2(input.amount);
+  const txCurrency = input.currency ?? accountCurrency;
+  if (txCurrency === accountCurrency) {
+    return { amount, currency: undefined, exchangeRate: undefined, baseAmount: undefined };
+  }
+  const rawRate =
+    typeof input.exchangeRate === "number" && Number.isFinite(input.exchangeRate) && input.exchangeRate > 0
+      ? round4(input.exchangeRate)
+      : effectiveExchangeRate(txCurrency, accountCurrency, rates);
+  const baseAmount =
+    typeof input.baseAmount === "number" && Number.isFinite(input.baseAmount) && input.baseAmount > 0
+      ? round2(input.baseAmount)
+      : round2(amount * rawRate);
+  return {
+    amount,
+    currency: txCurrency,
+    exchangeRate: rawRate,
+    baseAmount,
+  };
+}
+
 export const useFinance = create<Data & Actions>((set, get) => ({
   ...seedData(),
   addTxn: (input) => {
     const id = input.id ?? uid();
+    const state = get();
+    const moneyFields = resolveTxCurrencyFields(input, state.currency, state.exchangeRates);
     const tx: Tx = {
       id,
       kind: input.kind,
-      amount: round2(input.amount),
+      ...moneyFields,
       categoryId: input.categoryId,
       note: input.note.trim(),
       date: input.date,
@@ -217,20 +265,21 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       receiptId: input.receiptId,
       createdAt: Date.now(),
     };
-    set({ txns: [tx, ...get().txns.filter((t) => t.id !== id)] });
+    set({ txns: [tx, ...state.txns.filter((t) => t.id !== id)] });
     return id;
   },
   updateTxn: (id, input) => {
-    const existing = get().txns.find((t) => t.id === id);
+    const state = get();
+    const existing = state.txns.find((t) => t.id === id);
     if (!existing) return false;
-    const linkedPayment = get().payments.find((p) => p.txId === id);
+    const linkedPayment = state.payments.find((p) => p.txId === id);
     const amount = round2(input.amount);
     if (!Number.isFinite(amount) || amount <= 0) return false;
 
     if (linkedPayment) {
-      const debt = get().debts.find((d) => d.id === linkedPayment.debtId);
+      const debt = state.debts.find((d) => d.id === linkedPayment.debtId);
       if (debt) {
-        const otherPaid = get().payments.reduce(
+        const otherPaid = state.payments.reduce(
           (s, p) => (p.debtId === debt.id && p.id !== linkedPayment.id ? s + p.amount : s),
           0,
         );
@@ -241,7 +290,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       const nextKind = debt ? (debt.direction === "receivable" ? "income" : "expense") : existing.kind;
       const amountChanged = linkedPayment.amount !== amount || linkedPayment.date !== input.date;
       set({
-        txns: get().txns.map((t) =>
+        txns: state.txns.map((t) =>
           t.id === id
             ? {
                 ...t,
@@ -256,7 +305,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
               }
             : t,
         ),
-        payments: get().payments.map((p) =>
+        payments: state.payments.map((p) =>
           p.id === linkedPayment.id
             ? {
                 ...p,
@@ -269,7 +318,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
         ),
         debtLogs:
           debt && amountChanged
-            ? appendAudit(get().debtLogs, {
+            ? appendAudit(state.debtLogs, {
                 debtId: debt.id,
                 action: "payment-edited",
                 summary: `تعديل دفعة سابقة من ${linkedPayment.amount} إلى ${amount}`,
@@ -278,18 +327,28 @@ export const useFinance = create<Data & Actions>((set, get) => ({
                 beforeDate: linkedPayment.date,
                 afterDate: input.date,
               })
-            : get().debtLogs,
+            : state.debtLogs,
       });
       return true;
     }
 
+    const preservedRate =
+      input.currency && input.currency === existing.currency && input.exchangeRate === undefined
+        ? existing.exchangeRate
+        : input.exchangeRate;
+    const moneyFields = resolveTxCurrencyFields(
+      { ...input, exchangeRate: preservedRate },
+      state.currency,
+      state.exchangeRates,
+    );
+
     set({
-      txns: get().txns.map((t) =>
+      txns: state.txns.map((t) =>
         t.id === id
           ? {
               ...t,
               kind: input.kind,
-              amount,
+              ...moneyFields,
               categoryId: input.categoryId,
               note: input.note.trim(),
               date: input.date,
@@ -551,10 +610,54 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       : [{ id: "w-cash", name: "كاش", kind: "cash" as const, opening, createdAt: Date.now() }, ...get().wallets];
     set({ openingBalance: opening, wallets });
   },
-  setCurrency: (c) => set({ currency: c }),
+  setCurrency: (c) => {
+    const prev = get().currency;
+    if (prev === c) return;
+    set({
+      currency: c,
+      exchangeRates: defaultExchangeRatesFor(c),
+    });
+  },
+  setExchangeRate: (currency, rate) => {
+    if (currency === get().currency) return;
+    if (!Number.isFinite(rate) || rate <= 0) return;
+    set({
+      exchangeRates: {
+        ...(get().exchangeRates ?? defaultExchangeRatesFor(get().currency)),
+        [currency]: round4(rate),
+      },
+    });
+  },
   setPhoneCountryCode: (code) => {
     const sanitized = code.replace(/\D/g, "").slice(0, 4);
     set({ phoneCountryCode: sanitized || undefined });
+  },
+  importTransactionsBulk: (inputs) => {
+    const state = get();
+    const now = Date.now();
+    const created: Tx[] = [];
+    for (let i = 0; i < inputs.length; i++) {
+      const item = inputs[i];
+      if (!Number.isFinite(item.amount) || item.amount <= 0) continue;
+      const moneyFields = resolveTxCurrencyFields(item, state.currency, state.exchangeRates);
+      created.push({
+        id: item.id ?? uid(),
+        kind: item.kind,
+        ...moneyFields,
+        categoryId: item.categoryId,
+        note: item.note.trim(),
+        date: item.date,
+        personId: item.personId || undefined,
+        walletId: item.walletId || "w-cash",
+        source: item.source ?? "manual",
+        reported: item.reported !== false,
+        receiptId: item.receiptId,
+        createdAt: now + i,
+      });
+    }
+    if (!created.length) return 0;
+    set({ txns: [...created, ...state.txns], demo: false });
+    return created.length;
   },
   addWallet: (input) => {
     const id = uid();
@@ -882,6 +985,10 @@ export function asData(raw: unknown): Data | null {
     budgets: Array.isArray(d.budgets) ? d.budgets : [],
     openingBalance: cashOpeningOf(wallets, opening),
     currency: isCurrency(d.currency) ? d.currency : "EGP",
+    exchangeRates:
+      d.exchangeRates && typeof d.exchangeRates === "object"
+        ? d.exchangeRates
+        : defaultExchangeRatesFor(isCurrency(d.currency) ? d.currency : "EGP"),
     phoneCountryCode,
     demo: Boolean(d.demo),
     wallets,
@@ -1009,25 +1116,40 @@ export function exportCsv() {
   const s = useFinance.getState();
   const walletName = (id?: string) => s.wallets.find((w) => w.id === (id || "w-cash"))?.name ?? "";
   const personName = (id?: string) => s.people.find((p) => p.id === id)?.name ?? "";
-  const lines = ["النوع,التاريخ,البيان,التفاصيل,الشخص,المحفظة,الاتجاه,المبلغ"];
+  const lines = ["النوع,التاريخ,البيان,التفاصيل,الشخص,المحفظة,الاتجاه,المبلغ,العملة,سعر الصرف,المبلغ الأساسي"];
   for (const t of [...s.txns].sort((a, b) => (a.date < b.date ? 1 : -1))) {
     const cat = s.categories.find((c) => c.id === t.categoryId)?.name ?? "";
+    const cur = t.currency ?? s.currency;
+    const rate = t.exchangeRate ?? 1;
+    const base = typeof t.baseAmount === "number" ? t.baseAmount : t.amount;
     lines.push(
-      [t.kind === "income" ? "إيراد" : "مصروف", t.date, t.note || cat, cat, personName(t.personId), walletName(t.walletId), t.kind === "income" ? "داخل" : "خارج", t.amount]
+      [
+        t.kind === "income" ? "إيراد" : "مصروف",
+        t.date,
+        t.note || cat,
+        cat,
+        personName(t.personId),
+        walletName(t.walletId),
+        t.kind === "income" ? "داخل" : "خارج",
+        t.amount,
+        cur,
+        rate,
+        base,
+      ]
         .map(csvCell)
         .join(","),
     );
   }
   for (const tr of s.transfers) {
     lines.push(
-      ["تحويل", tr.date, tr.note || "تحويل", `${walletName(tr.fromId)} ← ${walletName(tr.toId)}`, "", walletName(tr.fromId), "خارج", tr.amount]
+      ["تحويل", tr.date, tr.note || "تحويل", `${walletName(tr.fromId)} ← ${walletName(tr.toId)}`, "", walletName(tr.fromId), "خارج", tr.amount, s.currency, 1, tr.amount]
         .map(csvCell)
         .join(","),
     );
   }
   for (const d of s.debts) {
     lines.push(
-      ["دين", d.dueDate, d.title, d.direction === "receivable" ? "لي" : "عليّ", personName(d.personId), "", d.direction === "receivable" ? "لي" : "عليّ", d.principal]
+      ["دين", d.dueDate, d.title, d.direction === "receivable" ? "لي" : "عليّ", personName(d.personId), "", d.direction === "receivable" ? "لي" : "عليّ", d.principal, s.currency, 1, d.principal]
         .map(csvCell)
         .join(","),
     );

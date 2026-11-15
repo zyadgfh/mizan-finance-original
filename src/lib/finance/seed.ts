@@ -1,4 +1,4 @@
-import { currentMonth, dateInMonth, shiftISO, todayISO } from "./logic.ts";
+import { currentMonth, dateInMonth, defaultExchangeRatesFor, shiftISO, todayISO } from "./logic.ts";
 import type { Data, Tx } from "./types.ts";
 
 function tx(
@@ -52,6 +52,7 @@ export function seedData(): Data {
   return {
     demo: true,
     currency: "EGP",
+    exchangeRates: defaultExchangeRatesFor("EGP"),
     openingBalance: 1400,
     txns,
     categories: [

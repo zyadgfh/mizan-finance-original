@@ -1,6 +1,5 @@
-import { Cloud, ChevronLeft, ChevronRight, Eye, EyeOff, Search, Shield } from "lucide-react";
-import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis } from "recharts";
-import { useEffect, useMemo, useState } from "react";
+import { Cloud, ChevronLeft, ChevronRight, Eye, EyeOff, FileSpreadsheet, Globe, Search, Shield, Sparkles, Terminal } from "lucide-react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { IconTile } from "@/components/finance/icons";
 import { useMizan, type DebtTabFilter } from "@/components/finance/context";
@@ -16,9 +15,12 @@ import {
   Section,
   Segment,
 } from "@/components/finance/ui";
+import { clearErrorLogs, loadErrorLogs } from "@/lib/finance/error-log";
+import { useI18n } from "@/lib/finance/i18n";
 import {
   budgetAlerts,
   cashPosition,
+  computeMonthlyAnalytics,
   currencySymbol,
   currentMonth,
   dayLabel,
@@ -28,6 +30,9 @@ import {
   defaultCountryCodeForCurrency,
   detectUnusualExpenses,
   dueTone,
+  effectiveExchangeRate,
+  formatNumber,
+  formatPercent,
   goalsSaved,
   installmentCount,
   installmentRows,
@@ -46,44 +51,43 @@ import {
   suggestCategoryBudget,
   sumKind,
   todayISO,
+  toLatinDigits,
+  txBaseAmount,
   walletBalance,
   weeklySpendingSummary,
   whatsappHref,
 } from "@/lib/finance/logic";
+import { getLatestPerfSample } from "@/lib/finance/perf-metrics";
+import { updateUiPrefs } from "@/lib/finance/prefs";
 import { exportMonthlyReportPdf } from "@/lib/finance/report-export";
 import { updateSecuritySettings, useSecuritySettings } from "@/lib/finance/security";
 import { exportCsv, exportData, exportDataAsync, importDataAsync, pickFinanceData, useFinance } from "@/lib/finance/store";
 import type { Currency, Debt, Tx } from "@/lib/finance/types";
 import { CURRENCIES } from "@/lib/finance/types";
 
-const CURRENCY_LABEL: Record<Currency, string> = {
-  EGP: "جنيه مصري",
-  SAR: "ريال سعودي",
-  AED: "درهم إماراتي",
-  USD: "دولار",
-  EUR: "يورو",
-};
-
 function MonthSwitch() {
   const { month, shiftMonth } = useMizan();
+  const { lang, numeralStyle, isRtl } = useI18n();
+  const PrevIcon = isRtl ? ChevronRight : ChevronLeft;
+  const NextIcon = isRtl ? ChevronLeft : ChevronRight;
   return (
     <div className="mt-3 inline-flex items-center rounded-pill bg-fill">
       <button
         type="button"
         className="flex min-h-11 min-w-11 items-center justify-center text-label"
         onClick={() => shiftMonth(-1)}
-        aria-label="الشهر السابق"
+        aria-label={lang === "en" ? "Previous month" : "الشهر السابق"}
       >
-        <ChevronRight size={20} strokeWidth={2} />
+        <PrevIcon size={20} strokeWidth={2} />
       </button>
-      <span className="min-w-36 text-center text-sub font-semibold">{monthLabel(month)}</span>
+      <span className="min-w-36 text-center text-sub font-semibold">{monthLabel(month, lang, numeralStyle)}</span>
       <button
         type="button"
         className="flex min-h-11 min-w-11 items-center justify-center text-label"
         onClick={() => shiftMonth(1)}
-        aria-label="الشهر التالي"
+        aria-label={lang === "en" ? "Next month" : "الشهر التالي"}
       >
-        <ChevronLeft size={20} strokeWidth={2} />
+        <NextIcon size={20} strokeWidth={2} />
       </button>
     </div>
   );
@@ -98,33 +102,42 @@ export function HomeScreen() {
     openGoals,
     openWallets,
     openDebtsFiltered,
+    openLedgerFiltered,
     setTab,
   } = useMizan();
   const data = useFinance();
   const { hideAmounts } = useSecuritySettings();
+  const { lang, numeralStyle, analyticsEnabled, t, catName } = useI18n();
   const confirmRecurring = useFinance((s) => s.confirmRecurring);
   const skipRecurring = useFinance((s) => s.skipRecurring);
-  const income = sumKind(data.txns, "income", month);
-  const expense = sumKind(data.txns, "expense", month);
+  const income = sumKind(data.txns, "income", month, data.currency, data.exchangeRates);
+  const expense = sumKind(data.txns, "expense", month, data.currency, data.exchangeRates);
   const net = income - expense;
   const cash = cashPosition(data);
   const saved = goalsSaved(data.goalMoves);
   const totals = debtTotals(data.debts, data.payments);
-  const weeks = monthWeeks(month, data.txns);
+  const weeks = monthWeeks(month, data.txns, data.currency, data.exchangeRates, numeralStyle);
   const hasChart = weeks.some((w) => w.income || w.expense);
   const today = todayISO();
   const isCurrentViewedMonth = month === currentMonth();
   const weekly = useMemo(
-    () => weeklySpendingSummary(data.txns, data.categories, today),
-    [data.txns, data.categories, today],
+    () => weeklySpendingSummary(data.txns, data.categories, today, data.currency, data.exchangeRates),
+    [data.txns, data.categories, today, data.currency, data.exchangeRates],
   );
   const activeAlerts = useMemo(
-    () => budgetAlerts(data.budgets, data.categories, data.txns, month).filter((b) => b.level !== "ok"),
-    [data.budgets, data.categories, data.txns, month],
+    () => budgetAlerts(data.budgets, data.categories, data.txns, month, data.currency, data.exchangeRates).filter((b) => b.level !== "ok"),
+    [data.budgets, data.categories, data.txns, month, data.currency, data.exchangeRates],
   );
   const unusual = useMemo(
-    () => (isCurrentViewedMonth ? detectUnusualExpenses(data.txns, data.categories, month) : { txAlerts: [], categoryAlerts: [] }),
-    [data.txns, data.categories, month, isCurrentViewedMonth],
+    () =>
+      isCurrentViewedMonth
+        ? detectUnusualExpenses(data.txns, data.categories, month, data.currency, data.exchangeRates)
+        : { txAlerts: [], categoryAlerts: [] },
+    [data.txns, data.categories, month, isCurrentViewedMonth, data.currency, data.exchangeRates],
+  );
+  const analytics = useMemo(
+    () => (analyticsEnabled ? computeMonthlyAnalytics(data, month, today) : null),
+    [analyticsEnabled, data, month, today],
   );
   const overdueDebts = useMemo(
     () => data.debts.filter((d) => debtStatus(d, data.payments, today) === "overdue"),
@@ -134,16 +147,18 @@ export function HomeScreen() {
     .map((d) => ({ debt: d, rem: remaining(d, data.payments), due: nextDueDate(d, data.payments) }))
     .filter((x) => x.rem > 0 && x.due && x.due <= addDays(today, 14))
     .sort((a, b) => a.due.localeCompare(b.due));
-  const recent = data.txns.filter((t) => t.date.startsWith(month)).sort(sortTx).slice(0, 6);
+  const recent = data.txns.filter((item) => item.date.startsWith(month)).sort(sortTx).slice(0, 6);
   const waiting = isCurrentViewedMonth ? pendingRecurring(data.recurring, month) : [];
   const budgets = data.budgets
     .map((b) => {
       const cat = data.categories.find((c) => c.id === b.categoryId);
       if (!cat) return null;
       const spent = sumKind(
-        data.txns.filter((t) => t.categoryId === b.categoryId),
+        data.txns.filter((item) => item.categoryId === b.categoryId),
         "expense",
         month,
+        data.currency,
+        data.exchangeRates,
       );
       return { ...b, cat, spent };
     })
@@ -153,12 +168,12 @@ export function HomeScreen() {
     <div>
       <div data-stagger className="px-4">
         <div className="flex items-center justify-between">
-          <h1 className="text-largetitle font-bold tracking-title">اليوم</h1>
+          <h1 className="text-largetitle font-bold tracking-title">{t("tabHome")}</h1>
           <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={() => openSheet({ kind: "search" })}
-              aria-label="بحث شامل"
+              aria-label={t("search")}
               className="flex min-h-11 min-w-11 items-center justify-center rounded-pill bg-fill text-label"
             >
               <Search size={18} strokeWidth={2} />
@@ -166,7 +181,15 @@ export function HomeScreen() {
             <button
               type="button"
               onClick={() => updateSecuritySettings({ hideAmounts: !hideAmounts })}
-              aria-label={hideAmounts ? "إظهار المبالغ" : "إخفاء المبالغ"}
+              aria-label={
+                hideAmounts
+                  ? lang === "en"
+                    ? "Show amounts"
+                    : "إظهار المبالغ"
+                  : lang === "en"
+                    ? "Hide amounts"
+                    : "إخفاء المبالغ"
+              }
               className="flex min-h-11 min-w-11 items-center justify-center rounded-pill bg-fill text-label"
             >
               {hideAmounts ? <Eye size={18} strokeWidth={2} /> : <EyeOff size={18} strokeWidth={2} />}
@@ -174,7 +197,7 @@ export function HomeScreen() {
           </div>
         </div>
         <MonthSwitch />
-        <p className="mt-6 text-sub text-label-2">صافي الشهر</p>
+        <p className="mt-6 text-sub text-label-2">{t("netThisMonth")}</p>
         <p className="text-largetitle font-bold tracking-title">
           <Amount value={net} currency={data.currency} sign="auto" />
         </p>
@@ -184,11 +207,11 @@ export function HomeScreen() {
         <Section className="mt-4">
           <Group>
             <Row
-              title="بيانات تجريبية"
-              sub="امسحها عندما تبدأ دفترَك"
+              title={lang === "en" ? "Sample Data" : "بيانات تجريبية"}
+              sub={lang === "en" ? "Clear it when you start your own ledger" : "امسحها عندما تبدأ دفترَك"}
               trailing={
                 <PillButton tone="gray" onClick={() => openSheet({ kind: "reset" })}>
-                  مسح
+                  {lang === "en" ? "Clear" : "مسح"}
                 </PillButton>
               }
             />
@@ -196,13 +219,13 @@ export function HomeScreen() {
         </Section>
       ) : null}
 
-      <div data-stagger className="mt-5 flex gap-2.5 overflow-x-auto px-4 pb-1">
+      <div data-stagger className="mt-5 flex gap-2.5 overflow-x-auto px-4 pb-1 lg:grid lg:grid-cols-4 lg:overflow-visible">
         {data.wallets.map((w) => (
           <button
             key={w.id}
             type="button"
             onClick={openWallets}
-            className="surface-card min-w-32 shrink-0 rounded-cell px-3.5 py-2.5 text-start"
+            className="surface-card min-w-32 shrink-0 rounded-cell px-3.5 py-2.5 text-start lg:min-w-0"
           >
             <span className="block text-caption text-label-2">{w.name}</span>
             <span className="mt-1 block text-sub font-semibold">
@@ -218,204 +241,338 @@ export function HomeScreen() {
           onClick={() => openSheet({ kind: "txn", prefill: { kind: "expense" } })}
           className="shrink-0 rounded-pill bg-fill px-3.5 py-2 text-caption font-semibold text-expense active:opacity-80"
         >
-          + مصروف سريع
+          {t("quickExpense")}
         </button>
         <button
           type="button"
           onClick={() => openSheet({ kind: "txn", prefill: { kind: "income" } })}
           className="shrink-0 rounded-pill bg-fill px-3.5 py-2 text-caption font-semibold text-income active:opacity-80"
         >
-          + إيراد سريع
+          {t("quickIncome")}
         </button>
         <button
           type="button"
           onClick={() => openSheet({ kind: "debt" })}
           className="shrink-0 rounded-pill bg-fill px-3.5 py-2 text-caption font-semibold text-tint active:opacity-80"
         >
-          + دين جديد
+          {t("quickDebt")}
         </button>
         <button
           type="button"
           onClick={() => openSheet({ kind: "split" })}
           className="shrink-0 rounded-pill bg-fill px-3.5 py-2 text-caption font-semibold text-label active:opacity-80"
         >
-          تقسيم فاتورة
+          {t("quickSplit")}
         </button>
       </div>
 
-      {activeAlerts.length || unusual.txAlerts.length || unusual.categoryAlerts.length || overdueDebts.length ? (
-        <Section title="تنبيهات ذكية">
-          <Group>
-            {overdueDebts.length ? (
-              <Row
-                title={`${overdueDebts.length} ديون متأخرة`}
-                sub="تجاوزت تاريخ الاستحقاق"
-                onClick={() => openDebtsFiltered("overdue")}
-                chevron
-                trailing={<span className="text-caption font-semibold text-expense">مراجعة</span>}
-              />
-            ) : null}
-            {activeAlerts.slice(0, 2).map((a) => (
-              <Row
-                key={a.category.id}
-                title={a.level === "over" ? `تجاوزت ميزانية ${a.category.name}` : `اقتربت من حد ${a.category.name}`}
-                sub={`الصرف ${Math.round(a.spent)} من ${Math.round(a.limit)} (${a.pct}%)`}
-                onClick={openReport}
-                chevron
-                trailing={
-                  <span className={a.level === "over" ? "text-caption font-semibold text-expense" : "text-caption font-semibold text-warn"}>
-                    {a.pct}%
-                  </span>
-                }
-              />
-            ))}
-            {unusual.txAlerts.slice(0, 1).map((u) => (
-              <Row
-                key={u.tx.id}
-                title={`صرف أعلى من المعتاد في ${u.categoryName}`}
-                sub={`${u.tx.note || u.categoryName} · ${u.ratio}x المتوسط`}
-                onClick={() => openSheet({ kind: "txn", id: u.tx.id })}
-                chevron
-                trailing={<Amount value={u.tx.amount} currency={data.currency} sign="minus" />}
-              />
-            ))}
-          </Group>
-        </Section>
-      ) : null}
+      <div className="lg:grid lg:grid-cols-12 lg:items-start lg:gap-4">
+        <div className="lg:col-span-5">
+          {activeAlerts.length || unusual.txAlerts.length || unusual.categoryAlerts.length || overdueDebts.length ? (
+            <Section title={lang === "en" ? "Smart Alerts" : "تنبيهات ذكية"}>
+              <Group>
+                {overdueDebts.length ? (
+                  <Row
+                    title={lang === "en" ? `${overdueDebts.length} overdue debts` : `${formatNumber(overdueDebts.length, numeralStyle, lang)} ديون متأخرة`}
+                    sub={lang === "en" ? "Past due date" : "تجاوزت تاريخ الاستحقاق"}
+                    onClick={() => openDebtsFiltered("overdue")}
+                    chevron
+                    trailing={<span className="text-caption font-semibold text-expense">{lang === "en" ? "Review" : "مراجعة"}</span>}
+                  />
+                ) : null}
+                {activeAlerts.slice(0, 2).map((a) => (
+                  <Row
+                    key={a.category.id}
+                    title={
+                      a.level === "over"
+                        ? lang === "en"
+                          ? `Over ${catName(a.category)} budget`
+                          : `تجاوزت ميزانية ${catName(a.category)}`
+                        : lang === "en"
+                          ? `Near ${catName(a.category)} budget`
+                          : `اقتربت من حد ${catName(a.category)}`
+                    }
+                    sub={
+                      lang === "en"
+                        ? `Spent ${formatNumber(Math.round(a.spent), numeralStyle, lang)} of ${formatNumber(Math.round(a.limit), numeralStyle, lang)}`
+                        : `الصرف ${formatNumber(Math.round(a.spent), numeralStyle, lang)} من ${formatNumber(Math.round(a.limit), numeralStyle, lang)} (${formatPercent(a.pct, numeralStyle, lang)})`
+                    }
+                    onClick={openReport}
+                    chevron
+                    trailing={
+                      <span className={a.level === "over" ? "text-caption font-semibold text-expense" : "text-caption font-semibold text-warn"}>
+                        {formatPercent(a.pct, numeralStyle, lang)}
+                      </span>
+                    }
+                  />
+                ))}
+                {unusual.txAlerts.slice(0, 1).map((u) => (
+                  <Row
+                    key={u.tx.id}
+                    title={lang === "en" ? `Higher than usual in ${u.categoryName}` : `صرف أعلى من المعتاد في ${u.categoryName}`}
+                    sub={`${u.tx.note || u.categoryName} · ${formatNumber(u.ratio, numeralStyle, lang)}x`}
+                    onClick={() => openSheet({ kind: "txn", id: u.tx.id })}
+                    chevron
+                    trailing={<Amount value={txBaseAmount(u.tx, data.currency, data.exchangeRates)} currency={data.currency} sign="minus" />}
+                  />
+                ))}
+              </Group>
+            </Section>
+          ) : null}
 
-      {waiting.length ? (
-        <Section title="بانتظار التأكيد" footer="التأكيد يسجّل الحركة اليوم. التخطي يؤجلها لنهاية الشهر.">
-          <Group>
-            {waiting.map((r) => {
-              const cat = data.categories.find((c) => c.id === r.categoryId);
-              return (
+          {waiting.length ? (
+            <Section
+              title={lang === "en" ? "Awaiting Confirmation" : "بانتظار التأكيد"}
+              footer={lang === "en" ? "Confirming records today; skipping defers until next month." : "التأكيد يسجّل الحركة اليوم. التخطي يؤجلها لنهاية الشهر."}
+            >
+              <Group>
+                {waiting.map((r) => {
+                  const cat = data.categories.find((c) => c.id === r.categoryId);
+                  return (
+                    <Row
+                      key={r.id}
+                      title={r.note || catName(cat)}
+                      sub={
+                        today.slice(8, 10) < String(r.day).padStart(2, "0")
+                          ? lang === "en"
+                            ? `Due day ${formatNumber(r.day, numeralStyle, lang)}`
+                            : `موعدها يوم ${formatNumber(r.day, numeralStyle, lang)}`
+                          : lang === "en"
+                            ? "Due now"
+                            : "حان موعدها"
+                      }
+                      trailing={
+                        <span className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="min-h-11 px-2 text-sub font-semibold text-label-2"
+                            onClick={() => {
+                              skipRecurring(r.id);
+                              toast(lang === "en" ? "Skipped for this month" : "تم التخطي هذا الشهر");
+                            }}
+                          >
+                            {lang === "en" ? "Skip" : "تخطي"}
+                          </button>
+                          <button
+                            type="button"
+                            className="min-h-11 px-2 text-sub font-semibold text-tint"
+                            onClick={() => {
+                              if (confirmRecurring(r.id)) toast(lang === "en" ? "Transaction recorded" : "سُجّلت الحركة");
+                            }}
+                          >
+                            {lang === "en" ? "Confirm" : "تأكيد"}
+                          </button>
+                        </span>
+                      }
+                    />
+                  );
+                })}
+              </Group>
+            </Section>
+          ) : null}
+
+          <Section title={t("thisMonth")}>
+            <Group>
+              <Row title={t("income")} trailing={<Amount value={income} currency={data.currency} sign="plus" />} />
+              <Row title={t("expense")} trailing={<Amount value={expense} currency={data.currency} sign="minus" />} />
+              {isCurrentViewedMonth ? (
                 <Row
-                  key={r.id}
-                  title={r.note || cat?.name || "متكرر"}
-                  sub={today.slice(8, 10) < String(r.day).padStart(2, "0") ? `موعدها يوم ${r.day}` : "حان موعدها"}
+                  title={lang === "en" ? "Last 7 Days Spend" : "مصاريف آخر 7 أيام"}
+                  sub={
+                    lang === "en"
+                      ? `Prior week ${formatNumber(Math.round(weekly.prevWeekExpense), numeralStyle, lang)}`
+                      : `الأسبوع السابق ${formatNumber(Math.round(weekly.prevWeekExpense), numeralStyle, lang)}`
+                  }
+                  trailing={<Amount value={weekly.currentWeekExpense} currency={data.currency} />}
+                />
+              ) : null}
+            </Group>
+          </Section>
+
+          <Section
+            title={t("situation")}
+            footer={
+              lang === "en"
+                ? "Cash is the sum of wallets. Debt payments move wallets without inflating monthly income/expense."
+                : "الرصيد مجموع المحافظ. سداد الدين وتحصيله يحرّكان المحفظة دون أن يُحسبا إيراداً أو مصروفاً جديداً."
+            }
+          >
+            <Group>
+              <Row title={t("cashBalance")} trailing={<Amount value={cash} currency={data.currency} sign="auto" />} onClick={openWallets} chevron />
+              <Row title={t("savedGoals")} trailing={<Amount value={saved} currency={data.currency} />} onClick={openGoals} chevron />
+              <Row title={t("receivable")} trailing={<Amount value={totals.receivable} currency={data.currency} sign="plus" />} onClick={() => setTab("debts")} chevron />
+              <Row title={t("payable")} trailing={<Amount value={totals.payable} currency={data.currency} sign="minus" />} onClick={() => setTab("debts")} chevron />
+              <Row title={t("monthReport")} sub={lang === "en" ? "6-month comparison & PDF / Excel export" : "مقارنة 6 أشهر وتصدير PDF / Excel"} chevron onClick={openReport} />
+            </Group>
+          </Section>
+
+          {budgets.length ? (
+            <Section title={t("budgets")}>
+              <Group>
+                {budgets.map((b) => {
+                  const pct = b.limit > 0 ? Math.min(100, Math.round((b.spent / b.limit) * 100)) : 0;
+                  const over = b.spent > b.limit;
+                  const near = !over && pct >= 80;
+                  return (
+                    <div key={b.categoryId} className="px-4 py-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-body">{catName(b.cat)}</span>
+                        <span className="num text-foot text-label-2" dir="ltr">
+                          {over ? (lang === "en" ? "Over · " : "تجاوز · ") : near ? (lang === "en" ? "Near · " : "قرب الحد · ") : ""}
+                          {formatNumber(Math.round(b.spent), numeralStyle, lang)} / {formatNumber(Math.round(b.limit), numeralStyle, lang)}
+                        </span>
+                      </div>
+                      <div className="mt-2">
+                        <AnimatedBar pct={pct} colorClass={over ? "bg-expense" : near ? "bg-warn" : "bg-tint"} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </Group>
+            </Section>
+          ) : null}
+        </div>
+
+        <div className="lg:col-span-7">
+          {analyticsEnabled && analytics ? (
+            <Section title={t("analyticsTitle")} footer={t("analyticsFooter")}>
+              <Group sep="icon">
+                <Row
+                  leading={
+                    <span className="icon-tile" style={{ background: "var(--tint)" }}>
+                      <Sparkles size={16} />
+                    </span>
+                  }
+                  title={t("analyticsDailyAvg")}
+                  sub={
+                    lang === "en"
+                      ? `Across ${formatNumber(analytics.elapsedDays, numeralStyle, lang)} days`
+                      : `على مدار ${formatNumber(analytics.elapsedDays, numeralStyle, lang)} يوماً`
+                  }
+                  trailing={<Amount value={analytics.dailyAverageExpense} currency={data.currency} />}
+                />
+                <Row
+                  leading={
+                    <span className="icon-tile" style={{ background: "var(--orange)" }}>
+                      <Sparkles size={16} />
+                    </span>
+                  }
+                  title={t("analyticsProjected")}
+                  sub={
+                    lang === "en"
+                      ? `Projected Net: ${money(analytics.projectedNet, data.currency, numeralStyle, lang)}`
+                      : `صافي متوقع: ${analytics.projectedNet >= 0 ? "+" : "−"}${money(Math.abs(analytics.projectedNet), data.currency, numeralStyle, lang)}`
+                  }
+                  trailing={<Amount value={analytics.projectedMonthEndExpense} currency={data.currency} sign="minus" />}
+                />
+                {analytics.highestSpendingDays.length ? (
+                  <div className="px-4 py-3">
+                    <p className="text-body font-medium text-label">{t("analyticsTopDays")}</p>
+                    <div className="mt-2 space-y-1.5">
+                      {analytics.highestSpendingDays.map((d) => (
+                        <div key={d.date} className="flex items-center justify-between text-foot">
+                          <span className="text-label-2">{shortDate(d.date, lang, numeralStyle)}</span>
+                          <Amount value={d.amount} currency={data.currency} sign="minus" />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {analytics.increasedCategories.length ? (
+                  <div className="px-4 py-3">
+                    <p className="text-body font-medium text-label">{t("analyticsIncreasedCats")}</p>
+                    <div className="mt-2 space-y-1.5">
+                      {analytics.increasedCategories.slice(0, 3).map((c) => (
+                        <div key={c.category.id} className="flex items-center justify-between text-foot">
+                          <span className="text-label-2">
+                            {catName(c.category)} (+{formatPercent(c.pctIncrease, numeralStyle, lang)})
+                          </span>
+                          <Amount value={c.delta} currency={data.currency} sign="minus" />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                <Row
+                  title={t("analyticsUncategorized")}
+                  sub={
+                    analytics.uncategorizedCount > 0
+                      ? lang === "en"
+                        ? "Tap to review in Ledger"
+                        : "اضغط لمراجعتها في السجل"
+                      : lang === "en"
+                        ? "All entries categorized"
+                        : "كل الحركات مصنّفة"
+                  }
+                  chevron={analytics.uncategorizedCount > 0}
+                  onClick={analytics.uncategorizedCount > 0 ? () => openLedgerFiltered("c-other-x") : undefined}
                   trailing={
-                    <span className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        className="min-h-11 px-2 text-sub font-semibold text-label-2"
-                        onClick={() => {
-                          skipRecurring(r.id);
-                          toast("تم التخطي هذا الشهر");
-                        }}
-                      >
-                        تخطي
-                      </button>
-                      <button
-                        type="button"
-                        className="min-h-11 px-2 text-sub font-semibold text-tint"
-                        onClick={() => {
-                          if (confirmRecurring(r.id)) toast("سُجّلت الحركة");
-                        }}
-                      >
-                        تأكيد
-                      </button>
+                    <span className="num text-body font-semibold text-label">
+                      {formatNumber(analytics.uncategorizedCount, numeralStyle, lang)}
                     </span>
                   }
                 />
-              );
-            })}
-          </Group>
-        </Section>
-      ) : null}
+              </Group>
+            </Section>
+          ) : (
+            <Section title={t("analyticsTitle")}>
+              <Group>
+                <Row
+                  title={t("analyticsDisabled")}
+                  trailing={
+                    <PillButton
+                      tone="gray"
+                      onClick={() => updateUiPrefs({ analyticsEnabled: true })}
+                    >
+                      {t("analyticsEnable")}
+                    </PillButton>
+                  }
+                />
+              </Group>
+            </Section>
+          )}
 
-      <Section title="هذا الشهر">
-        <Group>
-          <Row title="الإيرادات" trailing={<Amount value={income} currency={data.currency} sign="plus" />} />
-          <Row title="المصاريف" trailing={<Amount value={expense} currency={data.currency} sign="minus" />} />
-          {isCurrentViewedMonth ? (
-            <Row
-              title="مصاريف آخر 7 أيام"
-              sub={`الأسبوع السابق ${Math.round(weekly.prevWeekExpense)}`}
-              trailing={<Amount value={weekly.currentWeekExpense} currency={data.currency} />}
-            />
+          {dues.length ? (
+            <Section title={lang === "en" ? "Upcoming Dues" : "استحقاقات قريبة"}>
+              <Group sep="icon">
+                {dues.map(({ debt, rem }) => (
+                  <DebtRow key={debt.id} debt={debt} rem={rem} currency={data.currency} people={data.people} onOpen={() => openDebt(debt.id)} />
+                ))}
+              </Group>
+            </Section>
           ) : null}
-        </Group>
-      </Section>
 
-      <Section title="الوضع" footer="الرصيد مجموع المحافظ. سداد الدين وتحصيله يحرّكان المحفظة دون أن يُحسبا إيراداً أو مصروفاً جديداً.">
-        <Group>
-          <Row title="الرصيد النقدي" trailing={<Amount value={cash} currency={data.currency} sign="auto" />} onClick={openWallets} chevron />
-          <Row
-            title="مدّخر للأهداف"
-            trailing={<Amount value={saved} currency={data.currency} />}
-            onClick={openGoals}
-            chevron
-          />
-          <Row
-            title="لي عند الناس"
-            trailing={<Amount value={totals.receivable} currency={data.currency} sign="plus" />}
-            onClick={() => setTab("debts")}
-            chevron
-          />
-          <Row
-            title="عليّ للناس"
-            trailing={<Amount value={totals.payable} currency={data.currency} sign="minus" />}
-            onClick={() => setTab("debts")}
-            chevron
-          />
-          <Row title="تقرير الشهر" sub="مقارنة 6 أشهر وتصدير PDF / Excel" chevron onClick={openReport} />
-        </Group>
-      </Section>
+          <Section title={t("monthWeeks")}>
+            <div className="surface-card mx-4 rounded-cell px-2 py-3">
+              {hasChart ? (
+                <WeekChart weeks={weeks} />
+              ) : (
+                <p className="px-3 py-6 text-center text-sub text-label-2">
+                  {lang === "en" ? "No activity in this month" : "لا حركة في هذا الشهر"}
+                </p>
+              )}
+              <p className="px-3 pt-1 text-caption text-label-2">
+                {lang === "en" ? "Green = income, Red = expense." : "الأخضر إيراد، والأحمر مصروف."}
+              </p>
+            </div>
+          </Section>
 
-      {dues.length ? (
-        <Section title="استحقاقات قريبة">
-          <Group sep="icon">
-            {dues.map(({ debt, rem }) => (
-              <DebtRow key={debt.id} debt={debt} rem={rem} currency={data.currency} people={data.people} onOpen={() => openDebt(debt.id)} />
-            ))}
-          </Group>
-        </Section>
-      ) : null}
-
-      <Section title="أسابيع الشهر">
-        <div className="surface-card mx-4 rounded-cell px-2 py-3">
-          {hasChart ? <WeekChart weeks={weeks} /> : <p className="px-3 py-6 text-center text-sub text-label-2">لا حركة في هذا الشهر</p>}
-          <p className="px-3 pt-1 text-caption text-label-2">الأخضر إيراد، والأحمر مصروف.</p>
+          <Section title={t("recentTxns")}>
+            {recent.length ? (
+              <Group sep="icon">
+                {recent.map((item) => (
+                  <TxRow key={item.id} tx={item} onOpen={() => openSheet({ kind: "txn", id: item.id })} />
+                ))}
+              </Group>
+            ) : (
+              <EmptyState
+                title={lang === "en" ? "No Transactions" : "لا حركات"}
+                body={lang === "en" ? "Add an income or expense for this month." : "أضف إيراداً أو مصروفاً لهذا الشهر."}
+              />
+            )}
+          </Section>
         </div>
-      </Section>
-
-      {budgets.length ? (
-        <Section title="الميزانيات">
-          <Group>
-            {budgets.map((b) => {
-              const pct = b.limit > 0 ? Math.min(100, Math.round((b.spent / b.limit) * 100)) : 0;
-              const over = b.spent > b.limit;
-              const near = !over && pct >= 80;
-              return (
-                <div key={b.categoryId} className="px-4 py-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-body">{b.cat.name}</span>
-                    <span className="num text-foot text-label-2" dir="ltr">
-                      {over ? "تجاوز · " : near ? "قرب الحد · " : ""}
-                      {Math.round(b.spent)} / {Math.round(b.limit)}
-                    </span>
-                  </div>
-                  <div className="mt-2">
-                    <AnimatedBar pct={pct} colorClass={over ? "bg-expense" : near ? "bg-warn" : "bg-tint"} />
-                  </div>
-                </div>
-              );
-            })}
-          </Group>
-        </Section>
-      ) : null}
-
-      <Section title="آخر الحركات">
-        {recent.length ? (
-          <Group sep="icon">
-            {recent.map((t) => (
-              <TxRow key={t.id} tx={t} onOpen={() => openSheet({ kind: "txn", id: t.id })} />
-            ))}
-          </Group>
-        ) : (
-          <EmptyState title="لا حركات" body="أضف إيراداً أو مصروفاً لهذا الشهر." />
-        )}
-      </Section>
+      </div>
     </div>
   );
 }
@@ -429,44 +586,16 @@ function addDays(iso: string, days: number) {
   return `${dt.getFullYear()}-${mm}-${dd}`;
 }
 
+const LazyWeekChart = lazy(() => import("@/components/finance/week-chart"));
+
 function WeekChart({ weeks }: { weeks: { label: string; income: number; expense: number }[] }) {
   const [on, setOn] = useState(false);
   useEffect(() => setOn(true), []);
-  if (!on) return <div className="h-40" />;
+  if (!on) return <div className="h-44" />;
   return (
-    <div className="h-40">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={weeks} barGap={2} barCategoryGap="28%">
-          <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--label-2)" }} axisLine={false} tickLine={false} />
-          <Tooltip content={<ChartTip />} cursor={{ fill: "var(--fill)" }} />
-          <Bar dataKey="income" name="إيراد" fill="var(--green)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
-          <Bar dataKey="expense" name="مصروف" fill="var(--red)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function ChartTip({
-  active,
-  payload,
-  label,
-}: {
-  active?: boolean;
-  payload?: Array<{ name?: string; value?: number }>;
-  label?: string;
-}) {
-  const currency = useFinance((s) => s.currency);
-  if (!active || !payload?.length) return null;
-  return (
-    <div className="surface-card rounded-cell px-3 py-2 text-caption text-label">
-      <p className="text-label-2">{label}</p>
-      {payload.map((p) => (
-        <p key={p.name}>
-          {p.name}: <Amount value={Number(p.value ?? 0)} currency={currency} />
-        </p>
-      ))}
-    </div>
+    <Suspense fallback={<div className="h-44" />}>
+      <LazyWeekChart weeks={weeks} />
+    </Suspense>
   );
 }
 
@@ -474,16 +603,29 @@ function TxRow({ tx, onOpen }: { tx: Tx; onOpen: () => void }) {
   const categories = useFinance((s) => s.categories);
   const wallets = useFinance((s) => s.wallets);
   const currency = useFinance((s) => s.currency);
+  const exchangeRates = useFinance((s) => s.exchangeRates);
+  const { lang, numeralStyle, catName } = useI18n();
   const cat = categories.find((c) => c.id === tx.categoryId);
   const wallet = wallets.find((w) => w.id === (tx.walletId || "w-cash"));
-  const flags = [tx.reported === false ? "خارج الملخص" : "", tx.receiptId ? "إيصال" : ""].filter(Boolean).join(" · ");
+  const isForeign = Boolean(tx.currency && tx.currency !== currency);
+  const baseVal = txBaseAmount(tx, currency, exchangeRates);
+  const foreignTag = isForeign
+    ? `${formatNumber(tx.amount, numeralStyle, lang)} ${currencySymbol(tx.currency!, lang)}${tx.exchangeRate ? ` @ ${formatNumber(tx.exchangeRate, numeralStyle, lang)}` : ""}`
+    : "";
+  const flags = [
+    foreignTag,
+    tx.reported === false ? (lang === "en" ? "Excluded" : "خارج الملخص") : "",
+    tx.receiptId ? (lang === "en" ? "Receipt" : "إيصال") : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <Row
       onClick={onOpen}
       leading={cat ? <IconTile name={cat.icon} tone={cat.tone} /> : null}
-      title={tx.note || cat?.name || "حركة"}
-      sub={`${cat?.name ?? "بدون فئة"} · ${wallet?.name ?? "كاش"} · ${dayLabel(tx.date)}${flags ? ` · ${flags}` : ""}`}
-      trailing={<Amount value={tx.amount} currency={currency} sign={tx.kind === "income" ? "plus" : "minus"} />}
+      title={tx.note || catName(cat)}
+      sub={`${catName(cat)} · ${wallet?.name ?? (lang === "en" ? "Cash" : "كاش")} · ${dayLabel(tx.date, lang, numeralStyle)}${flags ? ` · ${flags}` : ""}`}
+      trailing={<Amount value={baseVal} currency={currency} sign={tx.kind === "income" ? "plus" : "minus"} />}
     />
   );
 }
@@ -535,6 +677,8 @@ export function LedgerScreen() {
   const categories = useFinance((s) => s.categories);
   const wallets = useFinance((s) => s.wallets);
   const currency = useFinance((s) => s.currency);
+  const exchangeRates = useFinance((s) => s.exchangeRates);
+  const { lang, numeralStyle, t, catName } = useI18n();
   const [scope, setScope] = useState<"all" | "month">("month");
   const [kind, setKind] = useState<"all" | "income" | "expense">("all");
   const [walletFilter, setWalletFilter] = useState<string>("all");
@@ -544,42 +688,59 @@ export function LedgerScreen() {
 
   const list = useMemo(() => {
     return txns
-      .filter((t) => (scope === "month" ? t.date.startsWith(month) : true))
-      .filter((t) => (kind === "all" ? true : t.kind === kind))
-      .filter((t) => (walletFilter === "all" ? true : (t.walletId || "w-cash") === walletFilter))
-      .filter((t) => (categoryFilter === "all" ? true : t.categoryId === categoryFilter))
-      .filter((t) => {
+      .filter((item) => (scope === "month" ? item.date.startsWith(month) : true))
+      .filter((item) => (kind === "all" ? true : item.kind === kind))
+      .filter((item) => (walletFilter === "all" ? true : (item.walletId || "w-cash") === walletFilter))
+      .filter((item) => (categoryFilter === "all" ? true : item.categoryId === categoryFilter))
+      .filter((item) => {
         if (!q) return true;
-        const cat = categories.find((c) => c.id === t.categoryId)?.name ?? "";
-        return normalizeSearch(`${t.note} ${cat}`).includes(q);
+        const cat = categories.find((c) => c.id === item.categoryId);
+        return normalizeSearch(`${item.note} ${catName(cat)} ${item.currency ?? currency}`).includes(q);
       })
-      .sort((a, b) => (sortBy === "amount" ? b.amount - a.amount : sortTx(a, b)));
-  }, [txns, scope, month, kind, walletFilter, categoryFilter, sortBy, q, categories]);
+      .sort((a, b) =>
+        sortBy === "amount"
+          ? txBaseAmount(b, currency, exchangeRates) - txBaseAmount(a, currency, exchangeRates)
+          : sortTx(a, b),
+      );
+  }, [txns, scope, month, kind, walletFilter, categoryFilter, sortBy, q, categories, currency, exchangeRates, catName]);
 
   const filteredNet = useMemo(
-    () => list.reduce((s, t) => s + (t.kind === "income" ? t.amount : -t.amount), 0),
-    [list],
+    () =>
+      list.reduce((s, item) => {
+        const val = txBaseAmount(item, currency, exchangeRates);
+        return s + (item.kind === "income" ? val : -val);
+      }, 0),
+    [list, currency, exchangeRates],
   );
 
   const groups = new Map<string, Tx[]>();
-  for (const t of list) {
-    const key = sortBy === "amount" ? "مرتّب حسب المبلغ" : t.date;
+  for (const item of list) {
+    const key = sortBy === "amount" ? (lang === "en" ? "Sorted by amount" : "مرتّب حسب المبلغ") : item.date;
     const arr = groups.get(key) ?? [];
-    arr.push(t);
+    arr.push(item);
     groups.set(key, arr);
   }
 
   return (
     <div>
       <div data-stagger className="flex items-center justify-between px-4">
-        <h1 className="text-largetitle font-bold tracking-title">السجل</h1>
-        <button
-          type="button"
-          onClick={() => openSheet({ kind: "search" })}
-          className="rounded-pill bg-fill px-3 py-1.5 text-caption font-semibold text-tint"
-        >
-          بحث شامل
-        </button>
+        <h1 className="text-largetitle font-bold tracking-title">{t("tabLedger")}</h1>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => openSheet({ kind: "csv-import" })}
+            className="rounded-pill bg-fill px-3 py-1.5 text-caption font-semibold text-label"
+          >
+            CSV
+          </button>
+          <button
+            type="button"
+            onClick={() => openSheet({ kind: "search" })}
+            className="rounded-pill bg-fill px-3 py-1.5 text-caption font-semibold text-tint"
+          >
+            {t("search")}
+          </button>
+        </div>
       </div>
       <div data-stagger className="mt-3 space-y-3">
         <div className="px-4">
@@ -587,9 +748,9 @@ export function LedgerScreen() {
             value={kind}
             onChange={setKind}
             options={[
-              { id: "all", label: "الكل" },
-              { id: "expense", label: "مصروف" },
-              { id: "income", label: "إيراد" },
+              { id: "all", label: t("all") },
+              { id: "expense", label: t("expenseSingular") },
+              { id: "income", label: t("incomeSingular") },
             ]}
           />
         </div>
@@ -598,8 +759,8 @@ export function LedgerScreen() {
             value={scope}
             onChange={setScope}
             options={[
-              { id: "month", label: monthLabel(month) },
-              { id: "all", label: "كل الأشهر" },
+              { id: "month", label: monthLabel(month, lang, numeralStyle) },
+              { id: "all", label: lang === "en" ? "All Months" : "كل الأشهر" },
             ]}
           />
         </div>
@@ -607,10 +768,10 @@ export function LedgerScreen() {
           <select
             className="surface-card min-h-10 flex-1 rounded-cell px-3 text-caption text-label"
             value={walletFilter}
-            aria-label="تصفية بالمحفظة"
+            aria-label={lang === "en" ? "Filter by wallet" : "تصفية بالمحفظة"}
             onChange={(e) => setWalletFilter(e.target.value)}
           >
-            <option value="all">كل المحافظ</option>
+            <option value="all">{lang === "en" ? "All Wallets" : "كل المحافظ"}</option>
             {wallets.map((w) => (
               <option key={w.id} value={w.id}>
                 {w.name}
@@ -620,13 +781,13 @@ export function LedgerScreen() {
           <select
             className="surface-card min-h-10 flex-1 rounded-cell px-3 text-caption text-label"
             value={categoryFilter}
-            aria-label="تصفية بالفئة"
+            aria-label={lang === "en" ? "Filter by category" : "تصفية بالفئة"}
             onChange={(e) => setLedgerCategoryFilter(e.target.value === "all" ? "" : e.target.value)}
           >
-            <option value="all">كل الفئات</option>
+            <option value="all">{lang === "en" ? "All Categories" : "كل الفئات"}</option>
             {categories.map((c) => (
               <option key={c.id} value={c.id}>
-                {c.name}
+                {catName(c)}
               </option>
             ))}
           </select>
@@ -635,24 +796,41 @@ export function LedgerScreen() {
             onClick={() => setSortBy((s) => (s === "date" ? "amount" : "date"))}
             className="surface-card min-h-10 shrink-0 rounded-cell px-3 text-caption font-semibold text-tint"
           >
-            {sortBy === "date" ? "التاريخ" : "الأكبر"}
+            {sortBy === "date" ? (lang === "en" ? "Date" : "التاريخ") : lang === "en" ? "Largest" : "الأكبر"}
           </button>
         </div>
-        <SearchField value={query} onChange={setQuery} placeholder="بحث في الحركات" />
+        <SearchField
+          value={query}
+          onChange={setQuery}
+          placeholder={lang === "en" ? "Search transactions" : "بحث في الحركات"}
+        />
         {list.length ? (
           <p className="px-4 text-caption text-label-2">
-            {list.length} حركة · الصافي: <Amount value={filteredNet} currency={currency} sign="auto" />
+            {formatNumber(list.length, numeralStyle, lang)}{" "}
+            {lang === "en" ? "items · Net:" : "حركة · الصافي:"}{" "}
+            <Amount value={filteredNet} currency={currency} sign="auto" />
           </p>
         ) : null}
       </div>
       {list.length === 0 ? (
-        <EmptyState title="لا نتائج" body="غيّر التصفية أو أضف حركة جديدة." action={<PillButton onClick={() => openSheet({ kind: "txn" })}>إضافة</PillButton>} />
+        <EmptyState
+          title={lang === "en" ? "No Results" : "لا نتائج"}
+          body={lang === "en" ? "Change filters or add a new transaction." : "غيّر التصفية أو أضف حركة جديدة."}
+          action={<PillButton onClick={() => openSheet({ kind: "txn" })}>{t("add")}</PillButton>}
+        />
       ) : (
         [...groups.entries()].map(([date, items]) => (
-          <Section key={date} title={date === "مرتّب حسب المبلغ" ? date : dayLabel(date)}>
+          <Section
+            key={date}
+            title={
+              date === "مرتّب حسب المبلغ" || date === "Sorted by amount"
+                ? date
+                : dayLabel(date, lang, numeralStyle)
+            }
+          >
             <Group sep="icon">
-              {items.map((t) => (
-                <TxRow key={t.id} tx={t} onOpen={() => openSheet({ kind: "txn", id: t.id })} />
+              {items.map((item) => (
+                <TxRow key={item.id} tx={item} onOpen={() => openSheet({ kind: "txn", id: item.id })} />
               ))}
             </Group>
           </Section>
@@ -664,6 +842,7 @@ export function LedgerScreen() {
 
 export function DebtsScreen() {
   const { openDebt, openSheet, debtFilter, setDebtFilter, query, setQuery } = useMizan();
+  const { lang, numeralStyle, t } = useI18n();
   const debts = useFinance((s) => s.debts);
   const payments = useFinance((s) => s.payments);
   const people = useFinance((s) => s.people);
@@ -701,7 +880,7 @@ export function DebtsScreen() {
   return (
     <div>
       <div data-stagger className="flex items-center justify-between px-4">
-        <h1 className="text-largetitle font-bold tracking-title">الديون</h1>
+        <h1 className="text-largetitle font-bold tracking-title">{t("tabDebts")}</h1>
         {overdueCount > 0 ? (
           <button
             type="button"
@@ -712,7 +891,7 @@ export function DebtsScreen() {
                 : "rounded-pill bg-expense/15 px-3 py-1 text-caption font-semibold text-expense"
             }
           >
-            متأخرة ({overdueCount})
+            {lang === "en" ? "Overdue" : "متأخرة"} ({formatNumber(overdueCount, numeralStyle, lang)})
           </button>
         ) : null}
       </div>
@@ -722,20 +901,28 @@ export function DebtsScreen() {
             value={debtFilter === "overdue" ? "open" : debtFilter}
             onChange={(val) => setDebtFilter(val)}
             options={[
-              { id: "open", label: "مفتوحة" },
-              { id: "receivable", label: "لي" },
-              { id: "payable", label: "عليّ" },
-              { id: "closed", label: "مسددة" },
+              { id: "open", label: lang === "en" ? "Open" : "مفتوحة" },
+              { id: "receivable", label: lang === "en" ? "Owed to Me" : "لي" },
+              { id: "payable", label: lang === "en" ? "I Owe" : "عليّ" },
+              { id: "closed", label: lang === "en" ? "Paid" : "مسددة" },
             ]}
           />
         </div>
-        <SearchField value={query} onChange={setQuery} placeholder="بحث في الديون" />
+        <SearchField value={query} onChange={setQuery} placeholder={lang === "en" ? "Search debts" : "بحث في الديون"} />
       </div>
       {rows.length === 0 ? (
         <EmptyState
-          title="لا ديون هنا"
-          body={debtFilter === "overdue" ? "لا توجد ديون متأخرة حالياً." : "سجّل ما لك وما عليك، ثم سدّد على دفعات."}
-          action={<PillButton onClick={() => openSheet({ kind: "debt" })}>دين جديد</PillButton>}
+          title={lang === "en" ? "No Debts Here" : "لا ديون هنا"}
+          body={
+            debtFilter === "overdue"
+              ? lang === "en"
+                ? "No overdue debts right now."
+                : "لا توجد ديون متأخرة حالياً."
+              : lang === "en"
+                ? "Track what is owed to you or by you, then record payments."
+                : "سجّل ما لك وما عليك، ثم سدّد على دفعات."
+          }
+          action={<PillButton onClick={() => openSheet({ kind: "debt" })}>{lang === "en" ? "New Debt" : "دين جديد"}</PillButton>}
         />
       ) : (
         <Section>
@@ -752,6 +939,7 @@ export function DebtsScreen() {
 
 export function PeopleScreen() {
   const { openPerson, openSheet, query, setQuery } = useMizan();
+  const { lang, t } = useI18n();
   const people = useFinance((s) => s.people);
   const debts = useFinance((s) => s.debts);
   const payments = useFinance((s) => s.payments);
@@ -765,14 +953,20 @@ export function PeopleScreen() {
   return (
     <div>
       <div data-stagger className="px-4">
-        <h1 className="text-largetitle font-bold tracking-title">الناس</h1>
-        <p className="mt-1 text-sub text-label-2">موجب يعني لك، وسالب يعني عليك.</p>
+        <h1 className="text-largetitle font-bold tracking-title">{t("tabPeople")}</h1>
+        <p className="mt-1 text-sub text-label-2">
+          {lang === "en" ? "Positive means owed to you; negative means you owe." : "موجب يعني لك، وسالب يعني عليك."}
+        </p>
       </div>
       <div data-stagger className="mt-3">
-        <SearchField value={query} onChange={setQuery} placeholder="بحث عن شخص" />
+        <SearchField value={query} onChange={setQuery} placeholder={lang === "en" ? "Search people" : "بحث عن شخص"} />
       </div>
       {rows.length === 0 ? (
-        <EmptyState title="لا أشخاص" body="أضف من تتعامل معهم في الديون." action={<PillButton onClick={() => openSheet({ kind: "person" })}>شخص جديد</PillButton>} />
+        <EmptyState
+          title={lang === "en" ? "No People" : "لا أشخاص"}
+          body={lang === "en" ? "Add contacts you share debts or expenses with." : "أضف من تتعامل معهم في الديون."}
+          action={<PillButton onClick={() => openSheet({ kind: "person" })}>{lang === "en" ? "New Person" : "شخص جديد"}</PillButton>}
+        />
       ) : (
         <Section>
           <Group>
@@ -780,7 +974,7 @@ export function PeopleScreen() {
               <Row
                 key={person.id}
                 title={<PersonName name={person.name} />}
-                sub={person.note || person.phone || "بدون ملاحظة"}
+                sub={person.note || person.phone || (lang === "en" ? "No note" : "بدون ملاحظة")}
                 chevron
                 onClick={() => openPerson(person.id)}
                 trailing={<Amount value={net} currency={currency} sign="auto" />}
@@ -1079,12 +1273,15 @@ export function MoreScreen() {
     pinHash,
   } = useMizan();
   const data = useFinance();
+  const { lang, numeralStyle, analyticsEnabled, t, catName, currencyName } = useI18n();
   const categories = data.categories;
   const budgets = data.budgets;
   const currency = data.currency;
+  const exchangeRates = data.exchangeRates;
   const phoneCountryCode = data.phoneCountryCode;
   const opening = data.openingBalance;
   const setCurrency = useFinance((s) => s.setCurrency);
+  const setExchangeRate = useFinance((s) => s.setExchangeRate);
   const setPhoneCountryCode = useFinance((s) => s.setPhoneCountryCode);
   const setOpening = useFinance((s) => s.setOpening);
   const setBudget = useFinance((s) => s.setBudget);
@@ -1096,6 +1293,8 @@ export function MoreScreen() {
   const [ccText, setCcText] = useState(phoneCountryCode ?? "");
   const [encPass, setEncPass] = useState("");
   const [showEncInput, setShowEncInput] = useState(false);
+  const [errorLogs, setErrorLogs] = useState(() => loadErrorLogs());
+  const latestPerf = useMemo(() => getLatestPerfSample(), []);
 
   useEffect(() => {
     setOpenText(String(opening));
@@ -1111,20 +1310,91 @@ export function MoreScreen() {
   return (
     <div>
       <div data-stagger className="px-4">
-        <h1 className="text-largetitle font-bold tracking-title">المزيد</h1>
-        <p className="mt-1 text-sub text-label-2">كل شيء يُحفظ على هذا الجهاز أولاً.</p>
+        <h1 className="text-largetitle font-bold tracking-title">{t("moreTitle")}</h1>
+        <p className="mt-1 text-sub text-label-2">
+          {lang === "en" ? "Everything stays saved locally on this device first." : "كل شيء يُحفظ على هذا الجهاز أولاً."}
+        </p>
       </div>
 
-      <Section title="أدوات">
+      <Section title={t("languageSection")} footer={t("languageFooter")}>
+        <Group sep="icon">
+          <div className="px-4 py-3">
+            <div className="flex items-center justify-between gap-2 pb-2">
+              <span className="inline-flex items-center gap-2 text-body">
+                <Globe size={16} className="text-tint" />
+                <span>{t("languageLabel")}</span>
+              </span>
+            </div>
+            <Segment<"ar" | "en">
+              value={lang}
+              onChange={(nextLang) => updateUiPrefs({ language: nextLang })}
+              options={[
+                { id: "ar", label: "العربية" },
+                { id: "en", label: "English" },
+              ]}
+            />
+          </div>
+          <div className="px-4 py-3">
+            <div className="flex items-center justify-between gap-2 pb-2">
+              <span className="text-body">{t("numeralsLabel")}</span>
+            </div>
+            <Segment<"latn" | "arab">
+              value={numeralStyle}
+              onChange={(nextStyle) => updateUiPrefs({ numeralStyle: nextStyle })}
+              options={[
+                { id: "latn", label: t("numeralsWestern") },
+                { id: "arab", label: t("numeralsArabicIndic") },
+              ]}
+            />
+          </div>
+          <div className="flex min-h-11 items-center justify-between gap-3 px-4 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="text-body">{t("analyticsToggleTitle")}</p>
+              <p className="text-foot text-label-2">{t("analyticsToggleSub")}</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={analyticsEnabled}
+              aria-label={t("analyticsToggleTitle")}
+              onClick={() => updateUiPrefs({ analyticsEnabled: !analyticsEnabled })}
+              className={
+                analyticsEnabled
+                  ? "h-7 w-12 shrink-0 rounded-pill bg-tint p-0.5"
+                  : "h-7 w-12 shrink-0 rounded-pill bg-fill p-0.5"
+              }
+            >
+              <span
+                className={
+                  analyticsEnabled ? "ms-auto block h-6 w-6 rounded-pill bg-cell" : "block h-6 w-6 rounded-pill bg-cell"
+                }
+              />
+            </button>
+          </div>
+        </Group>
+      </Section>
+
+      <Section title={t("toolsSection")}>
         <Group>
-          <Row title="تقرير الشهر" sub="مقارنة 6 أشهر وتصدير PDF / Excel / PNG" chevron onClick={openReport} />
-          <Row title="المحافظ والتحويل" chevron onClick={openWallets} />
-          <Row title="أهداف الادخار" chevron onClick={openGoals} />
-          <Row title="حركات متكررة" chevron onClick={openRecurring} />
-          <Row title="الإشعارات والمهام" sub="تذكيرات الديون والفواتير" chevron onClick={openNotifications} />
+          <Row title={t("monthReport")} sub={lang === "en" ? "6-month trends & PDF / Excel / PNG" : "مقارنة 6 أشهر وتصدير PDF / Excel / PNG"} chevron onClick={openReport} />
+          <Row title={lang === "en" ? "Wallets & Transfers" : "المحافظ والتحويل"} chevron onClick={openWallets} />
+          <Row title={lang === "en" ? "Savings Goals" : "أهداف الادخار"} chevron onClick={openGoals} />
+          <Row title={lang === "en" ? "Recurring Entries" : "حركات متكررة"} chevron onClick={openRecurring} />
+          <Row title={lang === "en" ? "Notifications & Tasks" : "الإشعارات والمهام"} sub={lang === "en" ? "Debt & bill reminders" : "تذكيرات الديون والفواتير"} chevron onClick={openNotifications} />
           <Row
-            title="مزامنة Google Drive"
-            sub="نسخة خاصة مشفّرة في appDataFolder"
+            title={t("importCsv")}
+            sub={t("importCsvSub")}
+            leading={
+              <span className="icon-tile" style={{ background: "var(--orange)" }}>
+                <FileSpreadsheet size={16} />
+              </span>
+            }
+            chevron
+            onClick={() => openSheet({ kind: "csv-import" })}
+          />
+          <Row
+            title={lang === "en" ? "Google Drive Sync" : "مزامنة Google Drive"}
+            sub={lang === "en" ? "Encrypted private copy in appDataFolder" : "نسخة خاصة مشفّرة في appDataFolder"}
             leading={
               <span className="icon-tile" style={{ background: "var(--tint)" }}>
                 <Cloud size={16} />
@@ -1134,8 +1404,16 @@ export function MoreScreen() {
             onClick={openDrive}
           />
           <Row
-            title="الأمان والخصوصية"
-            sub={pinHash ? "القفل مفعّل · البصمة · إخفاء الأرقام" : "رمز PIN · البصمة · إخفاء الأرقام · المسح الآمن"}
+            title={lang === "en" ? "Security & Privacy" : "الأمان والخصوصية"}
+            sub={
+              pinHash
+                ? lang === "en"
+                  ? "PIN Active · Biometrics · Masking"
+                  : "القفل مفعّل · البصمة · إخفاء الأرقام"
+                : lang === "en"
+                  ? "PIN · Biometrics · Masking · Secure Wipe"
+                  : "رمز PIN · البصمة · إخفاء الأرقام · المسح الآمن"
+            }
             leading={
               <span className="icon-tile" style={{ background: "var(--green)" }}>
                 <Shield size={16} />
@@ -1144,47 +1422,94 @@ export function MoreScreen() {
             chevron
             onClick={openSecurity}
           />
-          <Row title="تقسيم فاتورة" sub="حصتك مصروف وحصصهم دين لك" chevron onClick={() => openSheet({ kind: "split" })} />
+          <Row
+            title={t("quickSplit")}
+            sub={lang === "en" ? "Your share as expense, theirs as receivable debt" : "حصتك مصروف وحصصهم دين لك"}
+            chevron
+            onClick={() => openSheet({ kind: "split" })}
+          />
         </Group>
       </Section>
 
-      <Section title="العملة وكود الدولة" footer="تغيير العملة لا يحوّل المبالغ المسجّلة. كود الدولة يُستخدم لتنسيق روابط واتساب المحلية.">
+      <Section
+        title={t("currencySection")}
+        footer={
+          lang === "en"
+            ? "Existing transactions keep their frozen currency & rate. Country code formats local WhatsApp links."
+            : "تغيير العملة لا يغيّر أسعار المعاملات المجمّدة مسبقاً. كود الدولة يُستخدم لتنسيق روابط واتساب المحلية."
+        }
+      >
         <Group>
           {CURRENCIES.map((c) => (
             <Row
               key={c}
-              title={CURRENCY_LABEL[c]}
-              sub={currencySymbol(c)}
+              title={currencyName(c)}
+              sub={currencySymbol(c, lang)}
               onClick={() => setCurrency(c)}
               trailing={c === currency ? <span className="text-tint">✓</span> : null}
             />
           ))}
           <label className="flex min-h-11 items-center gap-3 px-4">
-            <span className="flex-1 text-body">كود دولة واتساب</span>
+            <span className="flex-1 text-body">{lang === "en" ? "WhatsApp Country Code" : "كود دولة واتساب"}</span>
             <input
               className="field num w-24 text-end"
               dir="ltr"
               inputMode="numeric"
               value={ccText}
               placeholder={fallbackCountryCode}
-              aria-label="كود دولة واتساب"
-              onChange={(e) => setCcText(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              aria-label={lang === "en" ? "WhatsApp Country Code" : "كود دولة واتساب"}
+              onChange={(e) => setCcText(toLatinDigits(e.target.value).replace(/\D/g, "").slice(0, 4))}
               onBlur={() => setPhoneCountryCode(ccText)}
             />
           </label>
         </Group>
       </Section>
 
-      <Section title="افتتاحي الكاش" footer="رصيد الكاش قبل أول حركة. باقي المحافظ تُعدَّل من شاشة المحافظ.">
+      <Section title={t("exchangeRatesSection")} footer={t("exchangeRatesFooter")}>
+        <Group>
+          {CURRENCIES.filter((c) => c !== currency).map((c) => {
+            const rate = effectiveExchangeRate(c, currency, exchangeRates);
+            return (
+              <label key={`${currency}-${c}`} className="flex min-h-11 items-center gap-3 px-4">
+                <span className="flex-1 text-body">
+                  1 {c} = ? {currency}
+                </span>
+                <input
+                  className="field num w-28 text-end"
+                  dir="ltr"
+                  inputMode="decimal"
+                  defaultValue={String(rate)}
+                  aria-label={`${c} rate`}
+                  onBlur={(e) => {
+                    const n = Number(toLatinDigits(e.target.value));
+                    if (Number.isFinite(n) && n > 0) {
+                      setExchangeRate(c, n);
+                    }
+                  }}
+                />
+              </label>
+            );
+          })}
+        </Group>
+      </Section>
+
+      <Section
+        title={lang === "en" ? "Cash Opening Balance" : "افتتاحي الكاش"}
+        footer={
+          lang === "en"
+            ? "Cash balance before your first transaction. Other wallets are edited in Wallets."
+            : "رصيد الكاش قبل أول حركة. باقي المحافظ تُعدَّل من شاشة المحافظ."
+        }
+      >
         <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
-            <span className="text-body">المبلغ</span>
+            <span className="text-body">{lang === "en" ? "Amount" : "المبلغ"}</span>
             <input
               className="field num text-end"
               dir="ltr"
               inputMode="decimal"
               value={openText}
-              onChange={(e) => setOpenText(e.target.value.replace(/[^\d.]/g, ""))}
+              onChange={(e) => setOpenText(toLatinDigits(e.target.value).replace(/[^\d.]/g, ""))}
               onBlur={() => {
                 const n = Number(openText);
                 if (!Number.isFinite(n) || n < 0) {
@@ -1198,26 +1523,37 @@ export function MoreScreen() {
         </div>
       </Section>
 
-      <Section title="ميزانيات المصروف" footer="صفر يعني بدون حد لهذا الشهر. تظهر اقتراحات مبنية على متوسط آخر 3 أشهر.">
+      <Section
+        title={lang === "en" ? "Expense Budgets" : "ميزانيات المصروف"}
+        footer={
+          lang === "en"
+            ? "Zero means no limit. Suggestions use your 3-month average."
+            : "صفر يعني بدون حد لهذا الشهر. تظهر اقتراحات مبنية على متوسط آخر 3 أشهر."
+        }
+      >
         <Group>
           {expenseCats.map((c) => {
             const limit = budgets.find((b) => b.categoryId === c.id)?.limit ?? 0;
-            const suggested = suggestCategoryBudget(c.id, data.txns, month);
+            const suggested = suggestCategoryBudget(c.id, data.txns, month, 3, currency, exchangeRates);
             return (
               <div key={`${c.id}-${limit}`} className="flex min-h-11 items-center gap-3 px-4 py-2">
                 <IconTile name={c.icon} tone={c.tone} />
                 <div className="min-w-0 flex-1">
-                  <p className="text-body">{c.name}</p>
+                  <p className="text-body">{catName(c)}</p>
                   {suggested > 0 && limit === 0 ? (
                     <button
                       type="button"
                       onClick={() => {
                         setBudget(c.id, suggested);
-                        toast(`ضُبطت ميزانية ${c.name} على ${suggested}`);
+                        toast(
+                          lang === "en"
+                            ? `Budget for ${catName(c)} set to ${suggested}`
+                            : `ضُبطت ميزانية ${catName(c)} على ${suggested}`,
+                        );
                       }}
                       className="text-caption font-semibold text-tint"
                     >
-                      اقتراح: {suggested}
+                      {lang === "en" ? `Suggested: ${formatNumber(suggested, numeralStyle, lang)}` : `اقتراح: ${formatNumber(suggested, numeralStyle, lang)}`}
                     </button>
                   ) : null}
                 </div>
@@ -1227,9 +1563,9 @@ export function MoreScreen() {
                   inputMode="decimal"
                   defaultValue={limit ? String(limit) : ""}
                   placeholder={suggested ? String(suggested) : "0"}
-                  aria-label={`ميزانية ${c.name}`}
+                  aria-label={`${lang === "en" ? "Budget" : "ميزانية"} ${catName(c)}`}
                   onBlur={(e) => {
-                    const n = Number(e.target.value);
+                    const n = Number(toLatinDigits(e.target.value));
                     setBudget(c.id, Number.isFinite(n) ? Math.max(0, n) : 0);
                   }}
                 />
@@ -1239,15 +1575,15 @@ export function MoreScreen() {
         </Group>
       </Section>
 
-      <Section title="فئة جديدة">
+      <Section title={lang === "en" ? "New Category" : "فئة جديدة"}>
         <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <div className="px-3 py-3">
             <Segment
               value={kind}
               onChange={setKind}
               options={[
-                { id: "expense", label: "مصروف" },
-                { id: "income", label: "إيراد" },
+                { id: "expense", label: t("expenseSingular") },
+                { id: "income", label: t("incomeSingular") },
               ]}
             />
           </div>
@@ -1256,20 +1592,20 @@ export function MoreScreen() {
             <input
               className="field"
               value={name}
-              placeholder="اسم الفئة"
+              placeholder={lang === "en" ? "Category name" : "اسم الفئة"}
               onChange={(e) => setName(e.target.value)}
             />
             <PillButton
               onClick={() => {
                 const id = addCategory(name, kind);
-                if (!id) toast("اكتب اسماً");
+                if (!id) toast(lang === "en" ? "Enter a name" : "اكتب اسماً");
                 else {
                   setName("");
-                  toast("أضيفت الفئة");
+                  toast(lang === "en" ? "Category added" : "أضيفت الفئة");
                 }
               }}
             >
-              أضف
+              {lang === "en" ? "Add" : "أضف"}
             </PillButton>
           </label>
         </div>
@@ -1282,35 +1618,37 @@ export function MoreScreen() {
                   key={c.id}
                   leading={<IconTile name={c.icon} tone={c.tone} />}
                   title={c.name}
-                  sub={c.kind === "income" ? "إيراد" : "مصروف"}
+                  sub={c.kind === "income" ? t("incomeSingular") : t("expenseSingular")}
                   onClick={() => {
                     if (!removeCategory(c.id)) {
-                      toast("الفئة مستخدمة في حركات أو تكرار");
+                      toast(lang === "en" ? "Category is used in transactions or recurring items" : "الفئة مستخدمة في حركات أو تكرار");
                       return;
                     }
-                    toast("حُذفت الفئة");
+                    toast(lang === "en" ? "Category deleted" : "حُذفت الفئة");
                   }}
-                  trailing={<span className="text-foot text-expense">حذف</span>}
+                  trailing={<span className="text-foot text-expense">{lang === "en" ? "Delete" : "حذف"}</span>}
                 />
               ))}
           </Group>
         </div>
       </Section>
 
-      <Section title="نسخة احتياطية وتصدير">
+      <Section title={lang === "en" ? "Backup, Import & Export" : "نسخة احتياطية واستيراد وتصدير"}>
         <Group>
-          <Row title="تصدير JSON" sub="نسخة خفيفة للبيانات" chevron onClick={() => exportData()} />
+          <Row title={lang === "en" ? "Export JSON" : "تصدير JSON"} sub={lang === "en" ? "Lightweight ledger backup" : "نسخة خفيفة للبيانات"} chevron onClick={() => exportData()} />
           <Row
-            title="تصدير JSON مع الإيصالات"
-            sub="يشمل صور الإيصالات المحفوظة"
+            title={lang === "en" ? "Export JSON with Receipts" : "تصدير JSON مع الإيصالات"}
+            sub={lang === "en" ? "Includes saved receipt images" : "يشمل صور الإيصالات المحفوظة"}
             chevron
             onClick={() => {
-              void exportDataAsync({ includeReceipts: true }).then(() => toast("تم تصدير النسخة الكاملة"));
+              void exportDataAsync({ includeReceipts: true }).then(() =>
+                toast(lang === "en" ? "Full backup exported" : "تم تصدير النسخة الكاملة"),
+              );
             }}
           />
           <Row
-            title="تصدير نسخة مشفّرة AES-GCM"
-            sub="محمية بكلمة مرور قبل المشاركة أو الحفظ"
+            title={lang === "en" ? "Export AES-GCM Encrypted Backup" : "تصدير نسخة مشفّرة AES-GCM"}
+            sub={lang === "en" ? "Protected with passphrase before saving" : "محمية بكلمة مرور قبل المشاركة أو الحفظ"}
             chevron
             onClick={() => setShowEncInput((v) => !v)}
           />
@@ -1320,39 +1658,40 @@ export function MoreScreen() {
                 type="password"
                 className="field flex-1"
                 value={encPass}
-                placeholder="كلمة مرور التشفير"
+                placeholder={lang === "en" ? "Encryption passphrase" : "كلمة مرور التشفير"}
                 onChange={(e) => setEncPass(e.target.value)}
               />
               <PillButton
                 onClick={() => {
                   if (encPass.trim().length < 4) {
-                    toast("اكتب كلمة مرور من 4 أحرف على الأقل");
+                    toast(lang === "en" ? "Use at least 4 characters" : "اكتب كلمة مرور من 4 أحرف على الأقل");
                     return;
                   }
                   void exportDataAsync({ includeReceipts: true, passphrase: encPass.trim() }).then(() => {
                     setEncPass("");
                     setShowEncInput(false);
-                    toast("تم تصدير النسخة المشفّرة");
+                    toast(lang === "en" ? "Encrypted backup exported" : "تم تصدير النسخة المشفّرة");
                   });
                 }}
               >
-                تشفير وتصدير
+                {lang === "en" ? "Encrypt & Export" : "تشفير وتصدير"}
               </PillButton>
             </div>
           ) : null}
-          <Row title="تصدير Excel" sub="ملف CSV يفتح في Excel" chevron onClick={() => exportCsv()} />
+          <Row title={lang === "en" ? "Export CSV (Excel)" : "تصدير Excel"} sub={lang === "en" ? "Spreadsheet with currency & rates" : "ملف CSV يفتح في Excel"} chevron onClick={() => exportCsv()} />
+          <Row title={t("importCsv")} sub={t("importCsvSub")} chevron onClick={() => openSheet({ kind: "csv-import" })} />
           <Row
-            title="طباعة / PDF للتقرير"
-            sub={`تقرير شهر ${monthLabel(month)}`}
+            title={lang === "en" ? "Print / PDF Report" : "طباعة / PDF للتقرير"}
+            sub={monthLabel(month, lang, numeralStyle)}
             chevron
             onClick={() => {
-              exportMonthlyReportPdf(pickFinanceData(data), month);
-              toast("جُهّز التقرير للطباعة / PDF");
+              exportMonthlyReportPdf(pickFinanceData(data), month, lang, numeralStyle);
+              toast(lang === "en" ? "Report ready for print / PDF" : "جُهّز التقرير للطباعة / PDF");
             }}
           />
           <Row
-            title="استيراد ملف"
-            sub="يدعم JSON العادي والمشفّر"
+            title={lang === "en" ? "Import JSON Backup" : "استيراد ملف"}
+            sub={lang === "en" ? "Supports plain and encrypted JSON" : "يدعم JSON العادي والمشفّر"}
             chevron
             onClick={() => document.getElementById("mizan-import")?.click()}
           />
@@ -1369,31 +1708,73 @@ export function MoreScreen() {
             const text = await file.text();
             try {
               await importDataAsync(text);
-              toast("تم الاستيراد");
+              toast(lang === "en" ? "Import complete" : "تم الاستيراد");
             } catch (err) {
               const msg = err instanceof Error ? err.message : "";
               if (msg.includes("مشفّرة") || msg.includes("كلمة مرور")) {
-                const pass = window.prompt("أدخل كلمة مرور النسخة المشفّرة:");
+                const pass = window.prompt(lang === "en" ? "Enter backup passphrase:" : "أدخل كلمة مرور النسخة المشفّرة:");
                 if (!pass) return;
                 try {
                   await importDataAsync(text, pass);
-                  toast("تم فك التشفير والاستيراد");
+                  toast(lang === "en" ? "Decrypted and imported" : "تم فك التشفير والاستيراد");
                 } catch {
-                  toast("كلمة المرور غير صحيحة أو الملف تالف");
+                  toast(lang === "en" ? "Incorrect passphrase or corrupted file" : "كلمة المرور غير صحيحة أو الملف تالف");
                 }
               } else {
-                toast(msg || "الملف غير مفهوم");
+                toast(msg || (lang === "en" ? "Invalid file format" : "الملف غير مفهوم"));
               }
             }
           }}
         />
       </Section>
 
+      <Section title={t("perfAndErrors")}>
+        <Group sep="icon">
+          <Row
+            leading={
+              <span className="icon-tile" style={{ background: "var(--gray)" }}>
+                <Terminal size={16} />
+              </span>
+            }
+            title={t("perfLastBoot")}
+            sub={
+              latestPerf
+                ? `${formatNumber(latestPerf.firstInteractiveMs, numeralStyle, lang)} ms`
+                : lang === "en"
+                  ? "Recorded locally on startup"
+                  : "يُسجَّل محلياً عند التشغيل"
+            }
+          />
+          <Row
+            title={t("errorLogCount")}
+            sub={errorLogs.length ? `#${errorLogs[0]!.id} · ${errorLogs[0]!.name}` : t("errorLogEmpty")}
+            trailing={
+              errorLogs.length ? (
+                <PillButton
+                  tone="plain"
+                  onClick={() => {
+                    clearErrorLogs();
+                    setErrorLogs([]);
+                    toast(lang === "en" ? "Error log cleared" : "تم مسح سجل الأخطاء");
+                  }}
+                >
+                  {t("clearErrorLog")}
+                </PillButton>
+              ) : (
+                <span className="num text-body text-label-2">{formatNumber(0, numeralStyle, lang)}</span>
+              )
+            }
+          />
+        </Group>
+      </Section>
+
       <Section>
         <Group>
-          <Row title="مسح كل البيانات" destructive onClick={() => openSheet({ kind: "reset" })} />
+          <Row title={lang === "en" ? "Clear All Data" : "مسح كل البيانات"} destructive onClick={() => openSheet({ kind: "reset" })} />
         </Group>
-        <p className="px-8 pt-6 text-center text-foot text-label-2">ميزان · كل الحقوق محفوظة لـ Zyad Gamal</p>
+        <p className="px-8 pt-6 text-center text-foot text-label-2">
+          {lang === "en" ? "Mizan · © Zyad Gamal" : "ميزان · كل الحقوق محفوظة لـ Zyad Gamal"}
+        </p>
       </Section>
     </div>
   );

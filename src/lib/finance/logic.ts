@@ -1,5 +1,6 @@
 import { format, isToday, isYesterday, parseISO } from "date-fns";
-import { arEG } from "date-fns/locale";
+import { arEG, enUS } from "date-fns/locale";
+import { getUiPrefs, type AppLanguage, type NumeralStyle } from "./prefs.ts";
 import type {
   Budget,
   Category,
@@ -11,6 +12,7 @@ import type {
   Goal,
   GoalCategory,
   GoalMove,
+  MonthlyAnalytics,
   Payment,
   Person,
   Recurring,
@@ -22,6 +24,10 @@ import { CURRENCIES } from "./types.ts";
 
 export function round2(n: number) {
   return Math.round(n * 100) / 100;
+}
+
+export function round4(n: number) {
+  return Math.round(n * 10000) / 10000;
 }
 
 export function isoFrom(d: Date) {
@@ -59,10 +65,18 @@ export function shiftMonthKey(month: string, delta: number) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-const SYMBOLS: Record<Currency, string> = {
+const SYMBOLS_AR: Record<Currency, string> = {
   EGP: "ج.م",
   SAR: "ر.س",
   AED: "د.إ",
+  USD: "$",
+  EUR: "€",
+};
+
+const SYMBOLS_EN: Record<Currency, string> = {
+  EGP: "EGP",
+  SAR: "SAR",
+  AED: "AED",
   USD: "$",
   EUR: "€",
 };
@@ -75,45 +89,156 @@ const COUNTRY_CODES: Record<Currency, string> = {
   EUR: "49",
 };
 
-export function currencySymbol(c: Currency) {
-  return SYMBOLS[c];
+/** Approximate baseline rates per 1 USD used strictly as initial default suggestions. */
+export const DEFAULT_USD_RATES: Record<Currency, number> = {
+  USD: 1,
+  EUR: 0.92,
+  SAR: 3.75,
+  AED: 3.67,
+  EGP: 50,
+};
+
+export function defaultExchangeRate(from: Currency, to: Currency): number {
+  if (from === to) return 1;
+  const fromUsd = DEFAULT_USD_RATES[from] || 1;
+  const toUsd = DEFAULT_USD_RATES[to] || 1;
+  return round4(toUsd / fromUsd);
+}
+
+export function defaultExchangeRatesFor(base: Currency): Partial<Record<Currency, number>> {
+  const out: Partial<Record<Currency, number>> = {};
+  for (const c of CURRENCIES) {
+    if (c !== base) out[c] = defaultExchangeRate(c, base);
+  }
+  return out;
+}
+
+export function effectiveExchangeRate(
+  from: Currency,
+  baseCurrency: Currency,
+  customRates?: Partial<Record<Currency, number>>,
+): number {
+  if (from === baseCurrency) return 1;
+  const custom = customRates?.[from];
+  if (typeof custom === "number" && Number.isFinite(custom) && custom > 0) {
+    return round4(custom);
+  }
+  return defaultExchangeRate(from, baseCurrency);
+}
+
+/**
+ * Returns the transaction amount in account base currency.
+ * Preserves the frozen `baseAmount` / `exchangeRate` stored when the transaction was recorded.
+ */
+export function txBaseAmount(
+  t: Pick<Tx, "amount" | "currency" | "exchangeRate" | "baseAmount">,
+  baseCurrency?: Currency,
+  customRates?: Partial<Record<Currency, number>>,
+): number {
+  if (typeof t.baseAmount === "number" && Number.isFinite(t.baseAmount)) {
+    return round2(t.baseAmount);
+  }
+  if (t.currency && (!baseCurrency || t.currency !== baseCurrency)) {
+    if (typeof t.exchangeRate === "number" && Number.isFinite(t.exchangeRate) && t.exchangeRate > 0) {
+      return round2(t.amount * t.exchangeRate);
+    }
+    if (baseCurrency) {
+      return round2(t.amount * effectiveExchangeRate(t.currency, baseCurrency, customRates));
+    }
+  }
+  return round2(t.amount);
+}
+
+const ARABIC_INDIC_DIGITS = ["٠", "١", "٢", "٣", "٤", "٥", "٦", "٧", "٨", "٩"];
+
+export function toArabicIndicDigits(text: string): string {
+  return text.replace(/\d/g, (d) => ARABIC_INDIC_DIGITS[Number(d)] ?? d);
+}
+
+export function toLatinDigits(text: string): string {
+  return text
+    .replace(/[٠-٩]/g, (ch) => String(ch.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (ch) => String(ch.charCodeAt(0) - 0x06f0))
+    .replace(/٫/g, ".")
+    .replace(/٬/g, ",");
+}
+
+export function currencySymbol(c: Currency, lang: AppLanguage = getUiPrefs().language) {
+  return (lang === "en" ? SYMBOLS_EN : SYMBOLS_AR)[c];
 }
 
 export function defaultCountryCodeForCurrency(c: Currency): string {
   return COUNTRY_CODES[c] ?? "20";
 }
 
-export function formatNumber(n: number) {
-  return new Intl.NumberFormat("ar-EG-u-nu-latn", {
+export function formatNumber(
+  n: number,
+  numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  lang: AppLanguage = getUiPrefs().language,
+) {
+  const formatted = new Intl.NumberFormat(lang === "en" ? "en-US" : "ar-EG-u-nu-latn", {
     minimumFractionDigits: Number.isInteger(n) ? 0 : 2,
     maximumFractionDigits: 2,
   }).format(n);
+  if (numeralStyle === "arab") {
+    return toArabicIndicDigits(formatted).replace(/\./g, "٫");
+  }
+  return formatted;
 }
 
-export function money(n: number, c: Currency) {
-  return `${formatNumber(Math.abs(n))} ${SYMBOLS[c]}`;
+export function formatPercent(
+  pct: number,
+  numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  lang: AppLanguage = getUiPrefs().language,
+): string {
+  const num = formatNumber(Math.round(pct), numeralStyle, lang);
+  return lang === "en" ? `${num}%` : `${num}٪`;
 }
 
-export function monthLabel(month: string) {
-  return format(parseISO(`${month}-01`), "MMMM yyyy", { locale: arEG });
+export function money(
+  n: number,
+  c: Currency,
+  numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  lang: AppLanguage = getUiPrefs().language,
+) {
+  return `${formatNumber(Math.abs(n), numeralStyle, lang)} ${currencySymbol(c, lang)}`;
 }
 
-export function dayLabel(date: string) {
+export function monthLabel(
+  month: string,
+  lang: AppLanguage = getUiPrefs().language,
+  numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+) {
+  const out = format(parseISO(`${month}-01`), "MMMM yyyy", { locale: lang === "en" ? enUS : arEG });
+  return numeralStyle === "arab" ? toArabicIndicDigits(out) : toLatinDigits(out);
+}
+
+export function dayLabel(
+  date: string,
+  lang: AppLanguage = getUiPrefs().language,
+  numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+) {
   const d = parseISO(date);
-  if (isToday(d)) return "اليوم";
-  if (isYesterday(d)) return "أمس";
-  return format(d, "EEEE d MMMM", { locale: arEG });
+  if (isToday(d)) return lang === "en" ? "Today" : "اليوم";
+  if (isYesterday(d)) return lang === "en" ? "Yesterday" : "أمس";
+  const out = format(d, "EEEE d MMMM", { locale: lang === "en" ? enUS : arEG });
+  return numeralStyle === "arab" ? toArabicIndicDigits(out) : toLatinDigits(out);
 }
 
-export function shortDate(date: string) {
+export function shortDate(
+  date: string,
+  lang: AppLanguage = getUiPrefs().language,
+  numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+) {
   if (!date) return "";
   const d = parseISO(date);
   const sameYear = d.getFullYear() === new Date().getFullYear();
-  return format(d, sameYear ? "d MMMM" : "d MMMM yyyy", { locale: arEG });
+  const out = format(d, sameYear ? "d MMMM" : "d MMMM yyyy", { locale: lang === "en" ? enUS : arEG });
+  return numeralStyle === "arab" ? toArabicIndicDigits(out) : toLatinDigits(out);
 }
 
 export function normalizeSearch(text: string): string {
-  return text
+  return toLatinDigits(text)
     .toLowerCase()
     .replace(/[\u064B-\u065F\u0670]/g, "")
     .replace(/[أإآ]/g, "ا")
@@ -138,25 +263,32 @@ export function countsInSummary(t: Tx) {
   return t.reported !== false;
 }
 
-export function sumKind(txns: Tx[], kind: Tx["kind"], month?: string) {
+export function sumKind(
+  txns: Tx[],
+  kind: Tx["kind"],
+  month?: string,
+  baseCurrency?: Currency,
+  rates?: Partial<Record<Currency, number>>,
+) {
   return round2(
     txns.reduce((s, t) => {
       if (t.kind !== kind || !countsInSummary(t)) return s;
       if (month && !t.date.startsWith(month)) return s;
-      return s + t.amount;
+      return s + txBaseAmount(t, baseCurrency, rates);
     }, 0),
   );
 }
 
 export function walletBalance(
   walletId: string,
-  data: Pick<Data, "wallets" | "txns" | "transfers" | "goalMoves">,
+  data: Pick<Data, "wallets" | "txns" | "transfers" | "goalMoves"> & Partial<Pick<Data, "currency" | "exchangeRates">>,
 ) {
   const wallet = data.wallets.find((w) => w.id === walletId);
   let n = wallet?.opening ?? 0;
   for (const t of data.txns) {
     if ((t.walletId || "w-cash") !== walletId) continue;
-    n += t.kind === "income" ? t.amount : -t.amount;
+    const val = txBaseAmount(t, data.currency, data.exchangeRates);
+    n += t.kind === "income" ? val : -val;
   }
   for (const tr of data.transfers) {
     if (tr.fromId === walletId) n -= tr.amount;
@@ -169,9 +301,31 @@ export function walletBalance(
   return round2(n);
 }
 
-export function cashPosition(data: Pick<Data, "txns" | "openingBalance" | "wallets" | "transfers" | "goalMoves">) {
+export function walletCurrencySummary(
+  walletId: string,
+  data: Pick<Data, "txns" | "currency">,
+): { currency: Currency; net: number }[] {
+  const byCurrency = new Map<Currency, number>();
+  for (const t of data.txns) {
+    if ((t.walletId || "w-cash") !== walletId) continue;
+    const c = t.currency ?? data.currency;
+    const delta = t.kind === "income" ? t.amount : -t.amount;
+    byCurrency.set(c, round2((byCurrency.get(c) ?? 0) + delta));
+  }
+  return [...byCurrency.entries()]
+    .filter(([c, net]) => c !== data.currency && Math.abs(net) > 0.009)
+    .map(([currency, net]) => ({ currency, net }));
+}
+
+export function cashPosition(
+  data: Pick<Data, "txns" | "openingBalance" | "wallets" | "transfers" | "goalMoves"> &
+    Partial<Pick<Data, "currency" | "exchangeRates">>,
+) {
   if (!data.wallets.length) {
-    const flow = data.txns.reduce((s, t) => s + (t.kind === "income" ? t.amount : -t.amount), 0);
+    const flow = data.txns.reduce(
+      (s, t) => s + (t.kind === "income" ? txBaseAmount(t, data.currency, data.exchangeRates) : -txBaseAmount(t, data.currency, data.exchangeRates)),
+      0,
+    );
     return round2(data.openingBalance + flow);
   }
   return round2(data.wallets.reduce((s, w) => s + walletBalance(w.id, data), 0));
@@ -203,7 +357,13 @@ export function personNet(personId: string, debts: Debt[], payments: Payment[]) 
   return round2(n);
 }
 
-export function monthWeeks(month: string, txns: Tx[]) {
+export function monthWeeks(
+  month: string,
+  txns: Tx[],
+  baseCurrency?: Currency,
+  rates?: Partial<Record<Currency, number>>,
+  numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+) {
   const [ys, ms] = month.split("-");
   const y = Number(ys);
   const m = Number(ms);
@@ -218,11 +378,13 @@ export function monthWeeks(month: string, txns: Tx[]) {
       if (!t.date.startsWith(month)) continue;
       const day = Number(t.date.slice(8, 10));
       if (day < start || day > end) continue;
-      if (t.kind === "income") income += t.amount;
-      else expense += t.amount;
+      const val = txBaseAmount(t, baseCurrency, rates);
+      if (t.kind === "income") income += val;
+      else expense += val;
     }
+    const rawLabel = start === end ? String(start) : `${start}–${end}`;
     return {
-      label: start === end ? String(start) : `${start}–${end}`,
+      label: numeralStyle === "arab" ? toArabicIndicDigits(rawLabel) : rawLabel,
       income: round2(income),
       expense: round2(expense),
     };
@@ -364,7 +526,14 @@ export function reminderText(
   title: string,
   amountLabel: string,
   direction: Debt["direction"],
+  lang: AppLanguage = getUiPrefs().language,
 ) {
+  if (lang === "en") {
+    if (direction === "receivable") {
+      return `Hi ${personName}, friendly reminder regarding "${title}". Remaining: ${amountLabel}. Let me know when works to settle.`;
+    }
+    return `Hi ${personName}, regarding "${title}", remaining I owe: ${amountLabel}. I will arrange the payment soon.`;
+  }
   if (direction === "receivable") {
     return `السلام عليكم ${personName}، تذكير ودي بخصوص «${title}». المتبقي ${amountLabel}. لو يناسبك السداد أبلغني.`;
   }
@@ -388,7 +557,12 @@ export function debtStatus(debt: Debt, payments: Payment[], today = todayISO()):
   return "active";
 }
 
-export function debtStatusLabel(status: DebtStatus): string {
+export function debtStatusLabel(status: DebtStatus, lang: AppLanguage = getUiPrefs().language): string {
+  if (lang === "en") {
+    if (status === "completed") return "Settled";
+    if (status === "overdue") return "Overdue";
+    return "Active";
+  }
   if (status === "completed") return "مكتمل";
   if (status === "overdue") return "متأخر";
   return "نشط";
@@ -398,62 +572,71 @@ const KEYWORD_CATEGORY_RULES: { kind: TxKind; categoryId: string; keywords: stri
   {
     kind: "expense",
     categoryId: "c-food",
-    keywords: ["طعام", "اكل", "مطعم", "غداء", "عشاء", "فطار", "قهوه", "كافيه", "سوبرماركت", "خضار", "سوق", "بقاله", "بيتزا", "شاي"],
+    keywords: [
+      "طعام", "اكل", "مطعم", "غداء", "عشاء", "فطار", "قهوه", "كافيه", "سوبرماركت", "خضار", "سوق", "بقاله", "بيتزا", "شاي",
+      "food", "restaurant", "lunch", "dinner", "breakfast", "coffee", "cafe", "grocery", "supermarket", "pizza",
+    ],
   },
   {
     kind: "expense",
     categoryId: "c-transport",
-    keywords: ["مواصلات", "اوبر", "كريم", "تاكسي", "بنزين", "مترو", "قطر", "سفر", "توصيل", "ركنه", "سياره", "عربيه"],
+    keywords: [
+      "مواصلات", "اوبر", "كريم", "تاكسي", "بنزين", "مترو", "قطر", "سفر", "توصيل", "ركنه", "سياره", "عربيه",
+      "uber", "careem", "taxi", "fuel", "gas", "metro", "train", "parking", "transport",
+    ],
   },
   {
     kind: "expense",
     categoryId: "c-bills",
-    keywords: ["كهرباء", "مياه", "غاز", "نت", "انترنت", "باقه", "تليفون", "موبايل", "شحن", "اشتراك", "فاتوره"],
+    keywords: [
+      "كهرباء", "مياه", "غاز", "نت", "انترنت", "باقه", "تليفون", "موبايل", "شحن", "اشتراك", "فاتوره",
+      "electric", "water", "internet", "wifi", "mobile", "phone", "subscription", "bill", "utility",
+    ],
   },
   {
     kind: "expense",
     categoryId: "c-home",
-    keywords: ["ايجار", "سكن", "صيانه", "سباكه", "تنظيف", "شقه", "بيت"],
+    keywords: ["ايجار", "سكن", "صيانه", "سباكه", "تنظيف", "شقه", "بيت", "rent", "housing", "maintenance"],
   },
   {
     kind: "expense",
     categoryId: "c-shop",
-    keywords: ["تسوق", "ملابس", "شراء", "مول", "امازون", "نون", "جهاز", "مستلزمات"],
+    keywords: ["تسوق", "ملابس", "شراء", "مول", "امازون", "نون", "جهاز", "مستلزمات", "shopping", "amazon", "clothes", "mall"],
   },
   {
     kind: "expense",
     categoryId: "c-health",
-    keywords: ["صحه", "صيدليه", "دواء", "علاج", "دكتور", "كشف", "مستشفي", "تحاليل", "اسنان"],
+    keywords: ["صحه", "صيدليه", "دواء", "علاج", "دكتور", "كشف", "مستشفي", "تحاليل", "اسنان", "pharmacy", "doctor", "clinic", "hospital"],
   },
   {
     kind: "expense",
     categoryId: "c-edu",
-    keywords: ["تعليم", "كورس", "كتاب", "دراسه", "مدرسه", "جامعه", "دوره"],
+    keywords: ["تعليم", "كورس", "كتاب", "دراسه", "مدرسه", "جامعه", "دوره", "course", "book", "tuition", "school"],
   },
   {
     kind: "expense",
     categoryId: "c-fun",
-    keywords: ["ترفيه", "سينما", "لعبه", "خروجه", "نادي", "مباراه", "رحله"],
+    keywords: ["ترفيه", "سينما", "لعبه", "خروجه", "نادي", "مباراه", "رحله", "cinema", "movie", "game", "club"],
   },
   {
     kind: "income",
     categoryId: "c-salary",
-    keywords: ["راتب", "مرتب", "قبض", "معاش"],
+    keywords: ["راتب", "مرتب", "قبض", "معاش", "salary", "payroll", "paycheck"],
   },
   {
     kind: "income",
     categoryId: "c-free",
-    keywords: ["عمل حر", "فريلانس", "تصميم", "برمجه", "استشاره", "مشروع", "عموله"],
+    keywords: ["عمل حر", "فريلانس", "تصميم", "برمجه", "استشاره", "مشروع", "عموله", "freelance", "consulting", "design"],
   },
   {
     kind: "income",
     categoryId: "c-gift",
-    keywords: ["هديه", "عيديه", "مكافاه", "بونص"],
+    keywords: ["هديه", "عيديه", "مكافاه", "بونص", "gift", "bonus", "reward"],
   },
   {
     kind: "income",
     categoryId: "c-invest",
-    keywords: ["عائد", "فائده", "ارباح", "استثمار", "شهاده"],
+    keywords: ["عائد", "فائده", "ارباح", "استثمار", "شهاده", "dividend", "interest", "return", "profit"],
   },
 ];
 
@@ -468,7 +651,6 @@ export function suggestCategoryFromNote(
   const available = categories.filter((c) => c.kind === kind && c.id !== "c-debt-out" && c.id !== "c-debt-in");
   const availableIds = new Set(available.map((c) => c.id));
 
-  // 1. Direct user history match (strongest signal when user re-enters a note)
   const historyScores = new Map<string, number>();
   for (const t of txns) {
     if (t.kind !== kind || !availableIds.has(t.categoryId)) continue;
@@ -490,13 +672,11 @@ export function suggestCategoryFromNote(
   }
   if (bestHistoryId) return bestHistoryId;
 
-  // 2. Custom or built-in category name directly mentioned in note
   for (const cat of available) {
     const cname = normalizeSearch(cat.name);
     if (cname && norm.includes(cname)) return cat.id;
   }
 
-  // 3. Domain keyword fallback
   for (const rule of KEYWORD_CATEGORY_RULES) {
     if (rule.kind !== kind || !availableIds.has(rule.categoryId)) continue;
     if (rule.keywords.some((kw) => norm.includes(kw))) return rule.categoryId;
@@ -513,6 +693,8 @@ export function detectUnusualExpenses(
   txns: Tx[],
   categories: Category[],
   month: string,
+  baseCurrency?: Currency,
+  rates?: Partial<Record<Currency, number>>,
 ): UnusualExpenseAlert {
   const prevMonths = [shiftMonthKey(month, -1), shiftMonthKey(month, -2), shiftMonthKey(month, -3)];
   const prevSet = new Set(prevMonths);
@@ -526,33 +708,35 @@ export function detectUnusualExpenses(
   }
 
   const catName = (id: string) => categories.find((c) => c.id === id)?.name ?? "مصروف";
+  const valOf = (t: Tx) => txBaseAmount(t, baseCurrency, rates);
   const overallAvg =
-    baselineExpenses.reduce((s, t) => s + t.amount, 0) / Math.max(1, baselineExpenses.length);
+    baselineExpenses.reduce((s, t) => s + valOf(t), 0) / Math.max(1, baselineExpenses.length);
 
   const txAlerts: UnusualExpenseAlert["txAlerts"] = [];
   for (const t of currentExpenses) {
+    const val = valOf(t);
     const sameCat = baselineExpenses.filter((b) => b.categoryId === t.categoryId);
     const baseline =
       sameCat.length >= 2
-        ? sameCat.reduce((s, b) => s + b.amount, 0) / sameCat.length
+        ? sameCat.reduce((s, b) => s + valOf(b), 0) / sameCat.length
         : baselineExpenses.length >= 4
           ? overallAvg
           : 0;
     if (baseline <= 0) continue;
-    const ratio = t.amount / baseline;
-    if (t.amount >= Math.max(200, baseline * 2)) {
+    const ratio = val / baseline;
+    if (val >= Math.max(200, baseline * 2)) {
       txAlerts.push({ tx: t, categoryName: catName(t.categoryId), baseline: round2(baseline), ratio: round2(ratio) });
     }
   }
-  txAlerts.sort((a, b) => b.tx.amount - a.tx.amount);
+  txAlerts.sort((a, b) => valOf(b.tx) - valOf(a.tx));
 
   const categoryAlerts: UnusualExpenseAlert["categoryAlerts"] = [];
   for (const cat of categories.filter((c) => c.kind === "expense" && c.id !== "c-debt-out")) {
-    const spent = currentExpenses.filter((t) => t.categoryId === cat.id).reduce((s, t) => s + t.amount, 0);
+    const spent = currentExpenses.filter((t) => t.categoryId === cat.id).reduce((s, t) => s + valOf(t), 0);
     if (spent <= 0) continue;
     const monthSums = prevMonths
       .map((m) =>
-        baselineExpenses.filter((t) => t.categoryId === cat.id && t.date.startsWith(m)).reduce((s, t) => s + t.amount, 0),
+        baselineExpenses.filter((t) => t.categoryId === cat.id && t.date.startsWith(m)).reduce((s, t) => s + valOf(t), 0),
       )
       .filter((v) => v > 0);
     if (!monthSums.length) continue;
@@ -572,6 +756,8 @@ export function suggestCategoryBudget(
   txns: Tx[],
   month: string,
   monthsBack = 3,
+  baseCurrency?: Currency,
+  rates?: Partial<Record<Currency, number>>,
 ): number {
   const totals: number[] = [];
   for (let i = 1; i <= monthsBack; i++) {
@@ -580,6 +766,8 @@ export function suggestCategoryBudget(
       txns.filter((t) => t.categoryId === categoryId),
       "expense",
       m,
+      baseCurrency,
+      rates,
     );
     if (sum > 0) totals.push(sum);
   }
@@ -588,6 +776,8 @@ export function suggestCategoryBudget(
       txns.filter((t) => t.categoryId === categoryId),
       "expense",
       month,
+      baseCurrency,
+      rates,
     );
     if (current <= 0) return 0;
     return Math.ceil(current / 50) * 50;
@@ -610,6 +800,8 @@ export function budgetAlerts(
   categories: Category[],
   txns: Tx[],
   month: string,
+  baseCurrency?: Currency,
+  rates?: Partial<Record<Currency, number>>,
 ): BudgetStatusItem[] {
   const rows: BudgetStatusItem[] = [];
   for (const b of budgets) {
@@ -620,6 +812,8 @@ export function budgetAlerts(
       txns.filter((t) => t.categoryId === b.categoryId),
       "expense",
       month,
+      baseCurrency,
+      rates,
     );
     const pct = Math.round((spent / b.limit) * 100);
     const level: BudgetStatusItem["level"] = spent > b.limit ? "over" : pct >= 80 ? "near" : "ok";
@@ -635,6 +829,18 @@ export const GOAL_CATEGORY_LABEL: Record<GoalCategory, string> = {
   device: "شراء جهاز",
   emergency: "صندوق طوارئ",
 };
+
+export const GOAL_CATEGORY_LABEL_EN: Record<GoalCategory, string> = {
+  general: "General Goal",
+  travel: "Travel Savings",
+  debt_payoff: "Debt Payoff",
+  device: "New Device",
+  emergency: "Emergency Fund",
+};
+
+export function goalCategoryLabel(cat: GoalCategory, lang: AppLanguage = getUiPrefs().language): string {
+  return (lang === "en" ? GOAL_CATEGORY_LABEL_EN : GOAL_CATEGORY_LABEL)[cat];
+}
 
 export type GoalEtaEstimate = {
   saved: number;
@@ -669,7 +875,6 @@ export function estimateGoalEta(goal: Goal, moves: GoalMove[], txns: Tx[] = []):
     const totalSaved = positiveMoves.reduce((s, m) => s + m.amount, 0);
     monthlyPace = round2(totalSaved / Math.max(1, months.size));
   } else {
-    // Fallback: half of recent positive monthly cash surplus
     const cur = currentMonth();
     const prev = shiftMonthKey(cur, -1);
     const netCur = sumKind(txns, "income", cur) - sumKind(txns, "expense", cur);
@@ -704,15 +909,22 @@ export function estimateGoalEta(goal: Goal, moves: GoalMove[], txns: Tx[] = []):
   };
 }
 
-export function multiMonthSummary(txns: Tx[], month: string, count = 6) {
+export function multiMonthSummary(
+  txns: Tx[],
+  month: string,
+  count = 6,
+  lang: AppLanguage = getUiPrefs().language,
+  baseCurrency?: Currency,
+  rates?: Partial<Record<Currency, number>>,
+) {
   const rows: { month: string; label: string; income: number; expense: number; net: number }[] = [];
   for (let i = count - 1; i >= 0; i--) {
     const m = shiftMonthKey(month, -i);
-    const income = sumKind(txns, "income", m);
-    const expense = sumKind(txns, "expense", m);
+    const income = sumKind(txns, "income", m, baseCurrency, rates);
+    const expense = sumKind(txns, "expense", m, baseCurrency, rates);
     rows.push({
       month: m,
-      label: format(parseISO(`${m}-01`), "MMM", { locale: arEG }),
+      label: format(parseISO(`${m}-01`), "MMM", { locale: lang === "en" ? enUS : arEG }),
       income,
       expense,
       net: round2(income - expense),
@@ -774,15 +986,16 @@ export function unifiedSearch(data: Data, filters: UnifiedSearchFilters) {
 
   const txns = data.txns
     .filter((t) => {
+      const val = txBaseAmount(t, data.currency, data.exchangeRates);
       if (filters.dateFrom && t.date < filters.dateFrom) return false;
       if (filters.dateTo && t.date > filters.dateTo) return false;
       if (filters.categoryId && t.categoryId !== filters.categoryId) return false;
       if (filters.personId && t.personId !== filters.personId) return false;
       if (filters.walletId && (t.walletId || "w-cash") !== filters.walletId) return false;
-      if (typeof filters.minAmount === "number" && Number.isFinite(filters.minAmount) && t.amount < filters.minAmount) {
+      if (typeof filters.minAmount === "number" && Number.isFinite(filters.minAmount) && val < filters.minAmount) {
         return false;
       }
-      if (typeof filters.maxAmount === "number" && Number.isFinite(filters.maxAmount) && t.amount > filters.maxAmount) {
+      if (typeof filters.maxAmount === "number" && Number.isFinite(filters.maxAmount) && val > filters.maxAmount) {
         return false;
       }
       if (filters.onlyRecurring && t.source !== "recurring") return false;
@@ -795,7 +1008,8 @@ export function unifiedSearch(data: Data, filters: UnifiedSearchFilters) {
       const cat = data.categories.find((c) => c.id === t.categoryId)?.name ?? "";
       const person = data.people.find((p) => p.id === t.personId)?.name ?? "";
       const wallet = data.wallets.find((w) => w.id === (t.walletId || "w-cash"))?.name ?? "";
-      return normalizeSearch(`${t.note} ${cat} ${person} ${wallet}`).includes(q);
+      const cur = t.currency ?? data.currency;
+      return normalizeSearch(`${t.note} ${cat} ${person} ${wallet} ${cur}`).includes(q);
     })
     .sort(sortTx);
 
@@ -832,7 +1046,13 @@ export function unifiedSearch(data: Data, filters: UnifiedSearchFilters) {
   return { txns, debts, people };
 }
 
-export function weeklySpendingSummary(txns: Tx[], categories: Category[], today = todayISO()) {
+export function weeklySpendingSummary(
+  txns: Tx[],
+  categories: Category[],
+  today = todayISO(),
+  baseCurrency?: Currency,
+  rates?: Partial<Record<Currency, number>>,
+) {
   const weekStart = addDaysISO(today, -6);
   const prevStart = addDaysISO(today, -13);
   const prevEnd = addDaysISO(today, -7);
@@ -843,12 +1063,13 @@ export function weeklySpendingSummary(txns: Tx[], categories: Category[], today 
 
   for (const t of txns) {
     if (t.kind !== "expense" || !countsInSummary(t)) continue;
+    const val = txBaseAmount(t, baseCurrency, rates);
     if (t.date >= weekStart && t.date <= today) {
-      currentWeekExpense = round2(currentWeekExpense + t.amount);
+      currentWeekExpense = round2(currentWeekExpense + val);
       count += 1;
-      byCat.set(t.categoryId, round2((byCat.get(t.categoryId) ?? 0) + t.amount));
+      byCat.set(t.categoryId, round2((byCat.get(t.categoryId) ?? 0) + val));
     } else if (t.date >= prevStart && t.date <= prevEnd) {
-      prevWeekExpense = round2(prevWeekExpense + t.amount);
+      prevWeekExpense = round2(prevWeekExpense + val);
     }
   }
   let topCatId = "";
@@ -863,12 +1084,113 @@ export function weeklySpendingSummary(txns: Tx[], categories: Category[], today 
   return { currentWeekExpense, prevWeekExpense, topCategoryName, count };
 }
 
-export function reportMetrics(data: Data, month: string) {
+const FALLBACK_UNCATEGORIZED_IDS = new Set(["", "c-other-x", "c-other-in"]);
+
+/**
+ * Computes strictly on-device analytics for the active month without any external calls.
+ */
+export function computeMonthlyAnalytics(
+  data: Pick<Data, "txns" | "categories" | "currency" | "exchangeRates">,
+  month: string,
+  today = todayISO(),
+): MonthlyAnalytics {
+  const [ys, ms] = month.split("-").map(Number);
+  const daysInMonth = ys && ms ? new Date(ys, ms, 0).getDate() : 30;
+  const curMonth = today.slice(0, 7);
+  const elapsedDays =
+    month < curMonth
+      ? daysInMonth
+      : month > curMonth
+        ? 0
+        : Math.max(1, Math.min(daysInMonth, Number(today.slice(8, 10)) || 1));
+
+  const monthTxns = data.txns.filter((t) => countsInSummary(t) && t.date.startsWith(month));
+  const totalIncome = sumKind(monthTxns, "income", month, data.currency, data.exchangeRates);
+  const totalExpense = sumKind(monthTxns, "expense", month, data.currency, data.exchangeRates);
+
+  const dailyAverageExpense = elapsedDays > 0 ? round2(totalExpense / elapsedDays) : 0;
+  const projectedMonthEndExpense =
+    month < curMonth
+      ? totalExpense
+      : elapsedDays > 0
+        ? round2(dailyAverageExpense * daysInMonth)
+        : totalExpense;
+  const projectedNet = round2(totalIncome - projectedMonthEndExpense);
+
+  // Highest-spending days
+  const byDay = new Map<string, { amount: number; count: number }>();
+  for (const t of monthTxns) {
+    if (t.kind !== "expense") continue;
+    const val = txBaseAmount(t, data.currency, data.exchangeRates);
+    const prev = byDay.get(t.date) ?? { amount: 0, count: 0 };
+    byDay.set(t.date, { amount: round2(prev.amount + val), count: prev.count + 1 });
+  }
+  const highestSpendingDays = [...byDay.entries()]
+    .map(([date, info]) => ({ date, amount: info.amount, count: info.count }))
+    .sort((a, b) => b.amount - a.amount || a.date.localeCompare(b.date))
+    .slice(0, 3);
+
+  // Categories with increased spending compared to the prior month
+  const prevMonth = shiftMonthKey(month, -1);
+  const increasedCategories: MonthlyAnalytics["increasedCategories"] = [];
+  for (const cat of data.categories) {
+    if (cat.kind !== "expense" || cat.id === "c-debt-out") continue;
+    const current = sumKind(
+      monthTxns.filter((t) => t.categoryId === cat.id),
+      "expense",
+      month,
+      data.currency,
+      data.exchangeRates,
+    );
+    if (current <= 0) continue;
+    const previous = sumKind(
+      data.txns.filter((t) => t.categoryId === cat.id),
+      "expense",
+      prevMonth,
+      data.currency,
+      data.exchangeRates,
+    );
+    const delta = round2(current - previous);
+    if (delta > 0.009) {
+      const pctIncrease = previous > 0 ? Math.round((delta / previous) * 100) : 100;
+      increasedCategories.push({ category: cat, current, previous, delta, pctIncrease });
+    }
+  }
+  increasedCategories.sort((a, b) => b.delta - a.delta);
+
+  // Uncategorized transactions in the active month
+  const validCatIds = new Set(data.categories.map((c) => c.id));
+  const uncategorizedTxIds = monthTxns
+    .filter((t) => FALLBACK_UNCATEGORIZED_IDS.has(t.categoryId) || !validCatIds.has(t.categoryId))
+    .map((t) => t.id);
+
+  return {
+    month,
+    totalExpense,
+    totalIncome,
+    elapsedDays,
+    daysInMonth,
+    dailyAverageExpense,
+    projectedMonthEndExpense,
+    projectedNet,
+    highestSpendingDays,
+    increasedCategories: increasedCategories.slice(0, 5),
+    uncategorizedCount: uncategorizedTxIds.length,
+    uncategorizedTxIds,
+  };
+}
+
+export function reportMetrics(
+  data: Data,
+  month: string,
+  lang: AppLanguage = getUiPrefs().language,
+  numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+) {
   const prev = shiftMonthKey(month, -1);
-  const income = sumKind(data.txns, "income", month);
-  const expense = sumKind(data.txns, "expense", month);
-  const prevIncome = sumKind(data.txns, "income", prev);
-  const prevExpense = sumKind(data.txns, "expense", prev);
+  const income = sumKind(data.txns, "income", month, data.currency, data.exchangeRates);
+  const expense = sumKind(data.txns, "expense", month, data.currency, data.exchangeRates);
+  const prevIncome = sumKind(data.txns, "income", prev, data.currency, data.exchangeRates);
+  const prevExpense = sumKind(data.txns, "expense", prev, data.currency, data.exchangeRates);
   const net = round2(income - expense);
   const prevNet = round2(prevIncome - prevExpense);
 
@@ -879,11 +1201,15 @@ export function reportMetrics(data: Data, month: string) {
         data.txns.filter((t) => t.categoryId === c.id),
         "expense",
         month,
+        data.currency,
+        data.exchangeRates,
       );
       const prevValue = sumKind(
         data.txns.filter((t) => t.categoryId === c.id),
         "expense",
         prev,
+        data.currency,
+        data.exchangeRates,
       );
       return { id: c.id, name: c.name, value, prevValue };
     })
@@ -906,7 +1232,7 @@ export function reportMetrics(data: Data, month: string) {
       .filter((x) => x.amount > 0 && x.due && x.due <= horizon),
     ...pendingRecurring(data.recurring, month).map((r) => ({
       id: r.id,
-      title: r.note || data.categories.find((c) => c.id === r.categoryId)?.name || "متكرر",
+      title: r.note || data.categories.find((c) => c.id === r.categoryId)?.name || (lang === "en" ? "Recurring" : "متكرر"),
       personName: "",
       due: `${month}-${String(r.day).padStart(2, "0")}`,
       amount: r.amount,
@@ -917,11 +1243,12 @@ export function reportMetrics(data: Data, month: string) {
 
   const totals = debtTotals(data.debts, data.payments);
   const debtPeople = topDebtPeople(data.people, data.debts, data.payments, 5);
-  const monthlyTrend = multiMonthSummary(data.txns, month, 6);
+  const monthlyTrend = multiMonthSummary(data.txns, month, 6, lang, data.currency, data.exchangeRates);
+  const analytics = computeMonthlyAnalytics(data, month, today);
 
   return {
     month,
-    monthLabel: monthLabel(month),
+    monthLabel: monthLabel(month, lang, numeralStyle),
     income,
     expense,
     net,
@@ -934,5 +1261,6 @@ export function reportMetrics(data: Data, month: string) {
     debtPeople,
     upcomingBills,
     monthlyTrend,
+    analytics,
   };
 }

@@ -5,30 +5,54 @@ import { PillButton, Section, Segment, Sheet } from "@/components/finance/ui";
 import { useMizan, type TxPrefill } from "@/components/finance/context";
 import { cn } from "@/lib/cn";
 import { frequentTemplates, loadEntryPrefs, rememberEntryChoice } from "@/lib/finance/entry-prefs";
-import { paidOf, planInstallments, round2, suggestCategoryFromNote, todayISO } from "@/lib/finance/logic";
+import { useI18n } from "@/lib/finance/i18n";
+import {
+  currencySymbol,
+  effectiveExchangeRate,
+  formatNumber,
+  paidOf,
+  planInstallments,
+  round2,
+  suggestCategoryFromNote,
+  todayISO,
+  toLatinDigits,
+} from "@/lib/finance/logic";
 import { compressReceipt, deleteReceipt, loadReceipt, saveReceipt } from "@/lib/finance/receipts";
 import { useFinance } from "@/lib/finance/store";
-import type { DebtCadence, DebtDirection, TxKind } from "@/lib/finance/types";
+import { CURRENCIES, type Currency, type DebtCadence, type DebtDirection, type TxKind } from "@/lib/finance/types";
 import { clearCachedGoogleToken } from "@/lib/sync/google-drive-gis";
 
 function parseAmount(raw: string) {
-  const n = Number(raw.replace(",", ".").trim());
+  const n = Number(toLatinDigits(raw).replace(",", ".").trim());
   return Number.isFinite(n) ? round2(n) : NaN;
 }
 
-function AmountField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function parseRate(raw: string) {
+  const n = Number(toLatinDigits(raw).replace(",", ".").trim());
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 10000) / 10000 : NaN;
+}
+
+function AmountField({
+  value,
+  onChange,
+  label = "المبلغ",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  label?: string;
+}) {
   return (
     <label className="block px-4 pt-2 text-center">
-      <span className="text-foot text-label-2">المبلغ</span>
+      <span className="text-foot text-label-2">{label}</span>
       <input
         className="amount-input"
         inputMode="decimal"
         dir="ltr"
         placeholder="0"
         value={value}
-        aria-label="المبلغ"
+        aria-label={label}
         onChange={(e) => {
-          const v = e.target.value.replace(/[^\d.]/g, "");
+          const v = toLatinDigits(e.target.value).replace(/[^\d.]/g, "");
           if ((v.match(/\./g) ?? []).length > 1) return;
           onChange(v);
         }}
@@ -39,6 +63,7 @@ function AmountField({ value, onChange }: { value: string; onChange: (v: string)
 
 export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
   const { closeSheet, frame } = useMizan();
+  const { lang, numeralStyle, t, catName } = useI18n();
   const txns = useFinance((s) => s.txns);
   const payments = useFinance((s) => s.payments);
   const debts = useFinance((s) => s.debts);
@@ -46,12 +71,14 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
   const people = useFinance((s) => s.people);
   const wallets = useFinance((s) => s.wallets);
   const recurring = useFinance((s) => s.recurring);
+  const accountCurrency = useFinance((s) => s.currency);
+  const exchangeRates = useFinance((s) => s.exchangeRates);
   const addTxn = useFinance((s) => s.addTxn);
   const updateTxn = useFinance((s) => s.updateTxn);
   const removeTxn = useFinance((s) => s.removeTxn);
   const restoreTxn = useFinance((s) => s.restoreTxn);
   const restorePayment = useFinance((s) => s.restorePayment);
-  const existing = txns.find((t) => t.id === id);
+  const existing = txns.find((item) => item.id === id);
   const linkedPayment = existing ? payments.find((p) => p.txId === existing.id) : undefined;
   const linkedDebt = linkedPayment ? debts.find((d) => d.id === linkedPayment.debtId) : undefined;
   const prefs = useMemo(() => loadEntryPrefs(), []);
@@ -69,12 +96,19 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
     (prefs.lastWalletId && wallets.some((w) => w.id === prefs.lastWalletId)
       ? prefs.lastWalletId
       : wallets[0]?.id ?? "w-cash");
+  const initialCurrency: Currency = existing?.currency ?? accountCurrency;
+  const initialRate =
+    initialCurrency === accountCurrency
+      ? 1
+      : existing?.exchangeRate ?? effectiveExchangeRate(initialCurrency, accountCurrency, exchangeRates);
 
   const [draftId] = useState(() => existing?.id ?? crypto.randomUUID());
   const [kind, setKind] = useState<TxKind>(initialKind);
   const [amount, setAmount] = useState(
     existing ? String(existing.amount) : prefill?.amount ? String(prefill.amount) : "",
   );
+  const [txCurrency, setTxCurrency] = useState<Currency>(initialCurrency);
+  const [rateText, setRateText] = useState(String(initialRate));
   const [categoryId, setCategoryId] = useState(initialCategory);
   const [manualCategoryPicked, setManualCategoryPicked] = useState(Boolean(existing || prefill?.categoryId));
   const [date, setDate] = useState(existing?.date ?? todayISO());
@@ -120,11 +154,33 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
     };
   }, [receiptOn, receiptKey]);
 
+  const parsedAmount = parseAmount(amount);
+  const parsedRate = txCurrency === accountCurrency ? 1 : parseRate(rateText);
+  const convertedBase =
+    Number.isFinite(parsedAmount) && parsedAmount > 0 && Number.isFinite(parsedRate) && parsedRate > 0
+      ? round2(parsedAmount * parsedRate)
+      : 0;
+
+  function handleCurrencyChange(nextCurrency: Currency) {
+    setTxCurrency(nextCurrency);
+    if (nextCurrency === accountCurrency) {
+      setRateText("1");
+    } else if (existing?.currency === nextCurrency && existing.exchangeRate) {
+      setRateText(String(existing.exchangeRate));
+    } else {
+      setRateText(String(effectiveExchangeRate(nextCurrency, accountCurrency, exchangeRates)));
+    }
+  }
+
   function save() {
     const n = parseAmount(amount);
     const cat = cats.find((c) => c.id === categoryId) ?? cats[0];
     if (!cat || !Number.isFinite(n) || n <= 0) {
-      toast("اكتب مبلغًا أكبر من صفر واختر فئة");
+      toast(lang === "en" ? "Enter an amount above zero and choose a category" : "اكتب مبلغًا أكبر من صفر واختر فئة");
+      return;
+    }
+    if (txCurrency !== accountCurrency && (!Number.isFinite(parsedRate) || parsedRate <= 0)) {
+      toast(lang === "en" ? "Enter a valid exchange rate" : "أدخل سعر صرف صالحاً");
       return;
     }
     if (linkedDebt && linkedPayment) {
@@ -133,13 +189,16 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
         0,
       );
       if (n > round2(linkedDebt.principal - otherPaid) + 0.009) {
-        toast("المبلغ أكبر من المتبقي على الدين");
+        toast(lang === "en" ? "Amount exceeds remaining debt" : "المبلغ أكبر من المتبقي على الدين");
         return;
       }
     }
     const input = {
       kind,
       amount: n,
+      currency: txCurrency,
+      exchangeRate: txCurrency === accountCurrency ? undefined : parsedRate,
+      baseAmount: txCurrency === accountCurrency ? undefined : round2(n * parsedRate),
       categoryId: cat.id,
       note,
       date,
@@ -150,7 +209,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
     if (existing) {
       const ok = updateTxn(existing.id, input);
       if (!ok) {
-        toast("تعذّر تحديث الحركة");
+        toast(lang === "en" ? "Could not update transaction" : "تعذّر تحديث الحركة");
         return;
       }
     } else {
@@ -158,7 +217,19 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
       rememberEntryChoice(kind, cat.id, walletId);
     }
     if (!receiptOn) void deleteReceipt(receiptKey);
-    toast(existing ? "تم تعديل الحركة" : kind === "income" ? "تم تسجيل الإيراد" : "تم تسجيل المصروف");
+    toast(
+      existing
+        ? lang === "en"
+          ? "Transaction updated"
+          : "تم تعديل الحركة"
+        : kind === "income"
+          ? lang === "en"
+            ? "Income recorded"
+            : "تم تسجيل الإيراد"
+          : lang === "en"
+            ? "Expense recorded"
+            : "تم تسجيل المصروف",
+    );
     closeSheet();
   }
 
@@ -169,7 +240,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
     setManualCategoryPicked(true);
     setWalletId(tpl.walletId);
     setNote(tpl.note);
-    toast(`طُبّق قالب «${tpl.title}»`);
+    toast(lang === "en" ? `Applied template "${tpl.title}"` : `طُبّق قالب «${tpl.title}»`);
   }
 
   function destroy() {
@@ -180,9 +251,9 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
     const receiptTimer = snapshot.tx.receiptId
       ? window.setTimeout(() => void deleteReceipt(snapshot.tx.id), 9000)
       : undefined;
-    toast("تم حذف الحركة", {
+    toast(lang === "en" ? "Transaction deleted" : "تم حذف الحركة", {
       action: {
-        label: "تراجع",
+        label: lang === "en" ? "Undo" : "تراجع",
         onClick: () => {
           if (receiptTimer !== undefined) window.clearTimeout(receiptTimer);
           restoreTxn(snapshot.tx);
@@ -194,17 +265,25 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
 
   return (
     <Sheet
-      title={existing ? "تعديل حركة" : "حركة جديدة"}
-      description="تسجيل إيراد أو مصروف"
+      title={
+        existing
+          ? lang === "en"
+            ? "Edit Transaction"
+            : "تعديل حركة"
+          : lang === "en"
+            ? "New Transaction"
+            : "حركة جديدة"
+      }
+      description={lang === "en" ? "Record income or expense" : "تسجيل إيراد أو مصروف"}
       container={frame}
       onClose={closeSheet}
       trailing={
         <PillButton onClick={save} tone="tint">
-          حفظ
+          {t("save")}
         </PillButton>
       }
     >
-      <AmountField value={amount} onChange={setAmount} />
+      <AmountField value={amount} onChange={setAmount} label={lang === "en" ? "Amount" : "المبلغ"} />
       {templates.length ? (
         <div className="mt-2 flex gap-1.5 overflow-x-auto px-4 pb-1">
           {templates.map((tpl) => (
@@ -214,7 +293,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
               onClick={() => applyTemplate(tpl)}
               className="shrink-0 rounded-pill bg-fill px-3 py-1.5 text-caption font-semibold text-label active:opacity-75"
             >
-              {tpl.title} · {tpl.amount}
+              {tpl.title} · {formatNumber(tpl.amount, numeralStyle, lang)}
             </button>
           ))}
         </div>
@@ -238,8 +317,8 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
               setManualCategoryPicked(false);
             }}
             options={[
-              { id: "expense", label: "مصروف" },
-              { id: "income", label: "إيراد" },
+              { id: "expense", label: t("expenseSingular") },
+              { id: "income", label: t("incomeSingular") },
             ]}
           />
         </div>
@@ -254,7 +333,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
             }}
             className="rounded-pill bg-tint/15 px-3 py-1 text-caption font-semibold text-tint"
           >
-            اقتراح التصنيف: {suggestedCat.name} ✓
+            {lang === "en" ? `Suggested: ${catName(suggestedCat)} ✓` : `اقتراح التصنيف: ${catName(suggestedCat)} ✓`}
           </button>
         </div>
       ) : null}
@@ -273,35 +352,84 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
             >
               <IconTile name={c.icon} tone={c.tone} />
               <span className={on ? "text-caption font-semibold text-tint" : "text-caption text-label-2"}>
-                {c.name}
+                {catName(c)}
               </span>
             </button>
           );
         })}
       </div>
-      <Section title="التفاصيل" className="mt-4">
+      <Section title={lang === "en" ? "Details & Currency" : "التفاصيل والعملة"} className="mt-4">
         <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
-            <span className="w-16 shrink-0 text-body">ملاحظة</span>
+            <span className="w-20 shrink-0 text-body">{t("txCurrency")}</span>
+            <select
+              className="field"
+              aria-label={t("txCurrency")}
+              value={txCurrency}
+              disabled={Boolean(linkedPayment)}
+              onChange={(e) => handleCurrencyChange(e.target.value as Currency)}
+            >
+              {CURRENCIES.map((c) => (
+                <option key={c} value={c}>
+                  {c} ({currencySymbol(c, lang)})
+                </option>
+              ))}
+            </select>
+          </label>
+          {txCurrency !== accountCurrency ? (
+            <>
+              <div className="row-sep" />
+              <label className="flex min-h-11 items-center gap-3 px-4">
+                <span className="w-20 shrink-0 text-body">{t("txRate")}</span>
+                <input
+                  className="field num"
+                  dir="ltr"
+                  inputMode="decimal"
+                  aria-label={t("txRate")}
+                  value={rateText}
+                  onChange={(e) => {
+                    const v = toLatinDigits(e.target.value).replace(/[^\d.]/g, "");
+                    if ((v.match(/\./g) ?? []).length > 1) return;
+                    setRateText(v);
+                  }}
+                />
+              </label>
+              <div className="row-sep" />
+              <div className="flex items-center justify-between px-4 py-2 text-caption text-label-2">
+                <span>{t("convertedPreview")}</span>
+                <span className="num font-semibold text-label" dir="ltr">
+                  {convertedBase > 0
+                    ? `${formatNumber(convertedBase, numeralStyle, lang)} ${currencySymbol(accountCurrency, lang)}`
+                    : "—"}
+                </span>
+              </div>
+              <p className="px-4 pb-2.5 text-caption text-label-3">{t("txFrozenRateNote")}</p>
+            </>
+          ) : null}
+          <div className="row-sep" />
+          <label className="flex min-h-11 items-center gap-3 px-4">
+            <span className="w-20 shrink-0 text-body">{lang === "en" ? "Note" : "ملاحظة"}</span>
             <input
               className="field"
               value={note}
-              placeholder="مثال: غداء، أوبر، كهرباء… (يقترح التصنيف)"
+              placeholder={
+                lang === "en" ? "e.g., Lunch, Uber, Rent… (suggests category)" : "مثال: غداء، أوبر، كهرباء… (يقترح التصنيف)"
+              }
               onChange={(e) => setNote(e.target.value)}
             />
           </label>
           <div className="row-sep" />
           <label className="flex min-h-11 items-center gap-3 px-4">
-            <span className="w-16 shrink-0 text-body">التاريخ</span>
+            <span className="w-20 shrink-0 text-body">{lang === "en" ? "Date" : "التاريخ"}</span>
             <input type="date" className="field" dir="ltr" value={date} onChange={(e) => setDate(e.target.value)} />
           </label>
           {!linkedPayment ? (
             <>
               <div className="row-sep" />
               <label className="flex min-h-11 items-center gap-3 px-4">
-                <span className="w-16 shrink-0 text-body">شخص</span>
+                <span className="w-20 shrink-0 text-body">{lang === "en" ? "Person" : "شخص"}</span>
                 <select className="field" value={personId} onChange={(e) => setPersonId(e.target.value)}>
-                  <option value="">بدون</option>
+                  <option value="">{lang === "en" ? "None" : "بدون"}</option>
                   {people.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name}
@@ -313,7 +441,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
           ) : null}
           <div className="row-sep" />
           <label className="flex min-h-11 items-center gap-3 px-4">
-            <span className="w-16 shrink-0 text-body">المحفظة</span>
+            <span className="w-20 shrink-0 text-body">{lang === "en" ? "Wallet" : "المحفظة"}</span>
             <select className="field" value={walletId} onChange={(e) => setWalletId(e.target.value)}>
               {wallets.map((w) => (
                 <option key={w.id} value={w.id}>
@@ -324,9 +452,9 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
           </label>
           <div className="row-sep" />
           <div className="flex min-h-11 items-center justify-between gap-3 px-4">
-            <span className="text-body">إيصال</span>
+            <span className="text-body">{lang === "en" ? "Receipt" : "إيصال"}</span>
             <label className="text-sub font-semibold text-tint">
-              {receiptOn ? "استبدال" : "إرفاق صورة"}
+              {receiptOn ? (lang === "en" ? "Replace" : "استبدال") : lang === "en" ? "Attach Image" : "إرفاق صورة"}
               <input
                 type="file"
                 accept="image/*"
@@ -339,14 +467,14 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
                     try {
                       const blob = await compressReceipt(file);
                       if (blob.size > 450_000) {
-                        toast("الصورة كبيرة حتى بعد التصغير");
+                        toast(lang === "en" ? "Image too large even after compression" : "الصورة كبيرة حتى بعد التصغير");
                         return;
                       }
                       await saveReceipt(receiptKey, blob);
                       setReceiptOn(true);
-                      toast("أُرفق الإيصال");
+                      toast(lang === "en" ? "Receipt attached" : "أُرفق الإيصال");
                     } catch {
-                      toast("تعذّر قراءة الصورة");
+                      toast(lang === "en" ? "Could not read image" : "تعذّر قراءة الصورة");
                     }
                   })();
                 }}
@@ -357,7 +485,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
             <>
               <div className="row-sep" />
               <div className="px-4 py-3">
-                <img src={preview} alt="إيصال" className="receipt-img h-36 w-full rounded-inner object-cover" />
+                <img src={preview} alt={lang === "en" ? "Receipt" : "إيصال"} className="receipt-img h-36 w-full rounded-inner object-cover" />
                 <button
                   type="button"
                   className="mt-2 min-h-11 text-sub text-expense"
@@ -366,7 +494,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
                     void deleteReceipt(receiptKey);
                   }}
                 >
-                  إزالة الإيصال
+                  {lang === "en" ? "Remove Receipt" : "إزالة الإيصال"}
                 </button>
               </div>
             </>
@@ -376,7 +504,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
       {existing ? (
         <div className="mt-6 flex justify-center">
           <PillButton tone="danger" onClick={destroy}>
-            حذف الحركة
+            {lang === "en" ? "Delete Transaction" : "حذف الحركة"}
           </PillButton>
         </div>
       ) : null}

@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, Download, FileJson, FileSpreadsheet, Fingerprint, Image as ImageIcon, Printer } from "lucide-react";
-import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis } from "recharts";
+import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useMizan } from "@/components/finance/context";
@@ -7,9 +7,12 @@ import { AnimatedBar } from "@/components/finance/gsap-motion";
 import { usePinShake } from "@/components/finance/motion-utils";
 import { Amount, EmptyState, Group, PersonName, PillButton, Row, Section } from "@/components/finance/ui";
 import { cn } from "@/lib/cn";
+import { useI18n } from "@/lib/finance/i18n";
 import {
   currencySymbol,
   estimateGoalEta,
+  formatNumber,
+  formatPercent,
   GOAL_CATEGORY_LABEL,
   goalsSaved,
   monthLabel,
@@ -25,15 +28,16 @@ import {
   shareMonthlyReportImage,
 } from "@/lib/finance/report-export";
 import { useSecuritySettings, verifyBiometricCredential } from "@/lib/finance/security";
-import { useFinance } from "@/lib/finance/store";
+import { pickFinanceData, useFinance } from "@/lib/finance/store";
 
 const DONUT = ["var(--tint)", "var(--orange)", "var(--red)", "var(--green)", "var(--gray)"];
 
 export function ReportScreen() {
   const { month, shiftMonth, openPerson, openDebt } = useMizan();
   const data = useFinance();
+  const { lang, numeralStyle, analyticsEnabled, isRtl, dir, t, catName } = useI18n();
   const [sharingImg, setSharingImg] = useState(false);
-  const report = reportMetrics(data, month);
+  const report = reportMetrics(data, month, lang, numeralStyle);
   const parts = report.categories;
   const total = parts.reduce((s, p) => s + p.value, 0);
   let cursor = 0;
@@ -44,53 +48,88 @@ export function ReportScreen() {
     return `${DONUT[i % DONUT.length]} ${start}% ${end}%`;
   });
   const hasTrend = report.monthlyTrend.some((m) => m.income > 0 || m.expense > 0);
+  const PrevIcon = isRtl ? ChevronRight : ChevronLeft;
+  const NextIcon = isRtl ? ChevronLeft : ChevronRight;
+  const snapshot = pickFinanceData(data);
 
   return (
     <div>
       <div data-stagger className="px-4">
-        <h1 className="text-largetitle font-bold tracking-title">التقرير الشهري</h1>
+        <h1 className="text-largetitle font-bold tracking-title">{t("monthReport")}</h1>
         <div className="mt-3 inline-flex items-center rounded-pill bg-fill">
-          <button type="button" className="flex min-h-11 min-w-11 items-center justify-center text-label" onClick={() => shiftMonth(-1)} aria-label="الشهر السابق">
-            <ChevronRight size={20} strokeWidth={2} />
+          <button
+            type="button"
+            className="flex min-h-11 min-w-11 items-center justify-center text-label"
+            onClick={() => shiftMonth(-1)}
+            aria-label={lang === "en" ? "Previous month" : "الشهر السابق"}
+          >
+            <PrevIcon size={20} strokeWidth={2} />
           </button>
-          <span className="min-w-36 text-center text-sub font-semibold">{monthLabel(month)}</span>
-          <button type="button" className="flex min-h-11 min-w-11 items-center justify-center text-label" onClick={() => shiftMonth(1)} aria-label="الشهر التالي">
-            <ChevronLeft size={20} strokeWidth={2} />
+          <span className="min-w-36 text-center text-sub font-semibold">{monthLabel(month, lang, numeralStyle)}</span>
+          <button
+            type="button"
+            className="flex min-h-11 min-w-11 items-center justify-center text-label"
+            onClick={() => shiftMonth(1)}
+            aria-label={lang === "en" ? "Next month" : "الشهر التالي"}
+          >
+            <NextIcon size={20} strokeWidth={2} />
           </button>
         </div>
       </div>
 
-      <Section title="التصدير والمشاركة">
+      <Section title={lang === "en" ? "Export & Share" : "التصدير والمشاركة"}>
         <div className="grid grid-cols-2 gap-2 px-4">
           <PillButton
             tone="tint"
             disabled={sharingImg}
             onClick={() => {
               setSharingImg(true);
-              void shareMonthlyReportImage(data, month)
-                .then(() => toast.success("جاهز للمشاركة أو الحفظ كصورة PNG"))
-                .catch(() => toast.error("تعذّر إنشاء صورة التقرير"))
+              void shareMonthlyReportImage(snapshot, month, lang, numeralStyle)
+                .then(() =>
+                  toast.success(
+                    lang === "en" ? "Ready to share or save as PNG" : "جاهز للمشاركة أو الحفظ كصورة PNG",
+                  ),
+                )
+                .catch(() =>
+                  toast.error(lang === "en" ? "Failed to generate report image" : "تعذّر إنشاء صورة التقرير"),
+                )
                 .finally(() => setSharingImg(false));
             }}
           >
             <ImageIcon size={15} />
-            <span>{sharingImg ? "جارٍ التجهيز…" : "مشاركة كصورة"}</span>
+            <span>
+              {sharingImg
+                ? lang === "en"
+                  ? "Preparing…"
+                  : "جارٍ التجهيز…"
+                : lang === "en"
+                  ? "Share PNG"
+                  : "مشاركة كصورة"}
+            </span>
           </PillButton>
           <PillButton
             tone="gray"
             onClick={() => {
-              const mode = exportMonthlyReportPdf(data, month);
-              toast(mode === "printed" ? "فُتحت نافذة الطباعة / PDF" : "تم تصدير التقرير القابل للطباعة");
+              const mode = exportMonthlyReportPdf(snapshot, month, lang, numeralStyle);
+              toast(
+                mode === "printed"
+                  ? lang === "en"
+                    ? "Opened Print / PDF dialog"
+                    : "فُتحت نافذة الطباعة / PDF"
+                  : lang === "en"
+                    ? "Printable HTML report exported"
+                    : "تم تصدير التقرير القابل للطباعة",
+              );
             }}
           >
             <Printer size={15} />
-            <span>PDF / طباعة</span>
+            <span>{lang === "en" ? "PDF / Print" : "PDF / طباعة"}</span>
           </PillButton>
           <PillButton
             tone="gray"
             onClick={() => {
-              exportMonthlyReportCsv(data, month);
-              toast.success("تم تصدير تقرير Excel (CSV)");
+              exportMonthlyReportCsv(snapshot, month, lang, numeralStyle);
+              toast.success(lang === "en" ? "Excel (CSV) report exported" : "تم تصدير تقرير Excel (CSV)");
             }}
           >
             <FileSpreadsheet size={15} />
@@ -99,38 +138,58 @@ export function ReportScreen() {
           <PillButton
             tone="gray"
             onClick={() => {
-              exportMonthlyReportJson(data, month);
-              toast.success("تم تصدير التقرير بصيغة JSON");
+              exportMonthlyReportJson(snapshot, month, lang, numeralStyle);
+              toast.success(lang === "en" ? "JSON report exported" : "تم تصدير التقرير بصيغة JSON");
             }}
           >
             <FileJson size={15} />
-            <span>ملف JSON</span>
+            <span>{lang === "en" ? "JSON File" : "ملف JSON"}</span>
           </PillButton>
         </div>
       </Section>
 
-      <Section title="الملخص وصافي التغير">
+      <Section title={lang === "en" ? "Summary & Net Change" : "الملخص وصافي التغير"}>
         <Group>
-          <Row title="إجمالي الإيرادات" trailing={<Amount value={report.income} currency={data.currency} sign="plus" />} />
-          <Row title="إجمالي المصروفات" trailing={<Amount value={report.expense} currency={data.currency} sign="minus" />} />
-          <Row title="صافي التغير في الرصيد" trailing={<Amount value={report.net} currency={data.currency} sign="auto" />} />
-          <Row title="الشهر السابق" trailing={<Amount value={report.prevNet} currency={data.currency} sign="auto" />} />
-          <Row title="الفرق عن السابق" trailing={<Amount value={report.net - report.prevNet} currency={data.currency} sign="auto" />} />
-          <Row title="السيولة المتاحة الآن" trailing={<Amount value={report.cashBalance} currency={data.currency} sign="auto" />} />
+          <Row title={t("income")} trailing={<Amount value={report.income} currency={data.currency} sign="plus" />} />
+          <Row title={t("expense")} trailing={<Amount value={report.expense} currency={data.currency} sign="minus" />} />
+          <Row title={t("netThisMonth")} trailing={<Amount value={report.net} currency={data.currency} sign="auto" />} />
+          <Row title={lang === "en" ? "Prior Month" : "الشهر السابق"} trailing={<Amount value={report.prevNet} currency={data.currency} sign="auto" />} />
+          <Row title={lang === "en" ? "Change vs Prior" : "الفرق عن السابق"} trailing={<Amount value={report.net - report.prevNet} currency={data.currency} sign="auto" />} />
+          <Row title={t("cashBalance")} trailing={<Amount value={report.cashBalance} currency={data.currency} sign="auto" />} />
+          {analyticsEnabled ? (
+            <>
+              <Row title={t("analyticsDailyAvg")} trailing={<Amount value={report.analytics.dailyAverageExpense} currency={data.currency} />} />
+              <Row title={t("analyticsProjected")} trailing={<Amount value={report.analytics.projectedMonthEndExpense} currency={data.currency} sign="minus" />} />
+            </>
+          ) : null}
         </Group>
       </Section>
 
-      <Section title="مقارنة آخر 6 أشهر">
+      <Section title={lang === "en" ? "Last 6 Months Comparison" : "مقارنة آخر 6 أشهر"}>
         <div className="surface-card mx-4 rounded-cell px-3 py-3">
           {hasTrend ? (
-            <div className="h-44">
+            <div className="h-44" dir="ltr">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={report.monthlyTrend} barGap={2} barCategoryGap="24%">
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--label-2)" }} axisLine={false} tickLine={false} />
+                  <XAxis
+                    dataKey="label"
+                    reversed={isRtl}
+                    tick={{ fontSize: 11, fill: "var(--label-2)" }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    orientation={isRtl ? "right" : "left"}
+                    width={44}
+                    tick={{ fontSize: 10, fill: "var(--label-3)" }}
+                    tickFormatter={(v) => formatNumber(Number(v), numeralStyle, lang)}
+                    axisLine={false}
+                    tickLine={false}
+                  />
                   <Tooltip
                     content={({ active, payload, label }) =>
                       active && payload?.length ? (
-                        <div className="surface-card rounded-cell px-3 py-2 text-caption">
+                        <div dir={dir} className="surface-card rounded-cell px-3 py-2 text-caption">
                           <p className="text-label-2">{label}</p>
                           {payload.map((p) => (
                             <p key={p.name}>
@@ -142,26 +201,36 @@ export function ReportScreen() {
                     }
                     cursor={{ fill: "var(--fill)" }}
                   />
-                  <Bar dataKey="income" name="الإيرادات" fill="var(--green)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                  <Bar dataKey="expense" name="المصروفات" fill="var(--red)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                  <Bar dataKey="income" name={t("income")} fill="var(--green)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                  <Bar dataKey="expense" name={t("expense")} fill="var(--red)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
           ) : (
-            <p className="py-6 text-center text-sub text-label-2">سجّل حركات لتظهر المقارنة بين الأشهر</p>
+            <p className="py-6 text-center text-sub text-label-2">
+              {lang === "en" ? "Record transactions to see monthly trends" : "سجّل حركات لتظهر المقارنة بين الأشهر"}
+            </p>
           )}
         </div>
       </Section>
 
-      <Section title="أعلى التصنيفات إنفاقاً" footer="سداد الديون والتحويلات لا تدخل في هذه الدائرة.">
+      <Section
+        title={lang === "en" ? "Top Spending Categories" : "أعلى التصنيفات إنفاقاً"}
+        footer={lang === "en" ? "Debt repayments and transfers are excluded from spending breakdown." : "سداد الديون والتحويلات لا تدخل في هذه الدائرة."}
+      >
         {parts.length === 0 ? (
-          <EmptyState title="لا مصروف" body="سجّل مصروفاً في هذا الشهر ليظهر التوزيع." />
+          <EmptyState
+            title={lang === "en" ? "No Expenses" : "لا مصروف"}
+            body={lang === "en" ? "Record an expense in this month to view category distribution." : "سجّل مصروفاً في هذا الشهر ليظهر التوزيع."}
+          />
         ) : (
           <>
             <div className="flex justify-center px-4">
               <div className="surface-card relative h-40 w-40 rounded-pill" style={{ background: `conic-gradient(${stops.join(", ")})` }}>
                 <div className="absolute inset-4 flex items-center justify-center rounded-pill bg-grouped text-center">
-                  <span className="num text-foot font-medium text-label-2">{Math.round(total)} {currencySymbol(data.currency)}</span>
+                  <span className="num text-foot font-medium text-label-2">
+                    {formatNumber(Math.round(total), numeralStyle, lang)} {currencySymbol(data.currency, lang)}
+                  </span>
                 </div>
               </div>
             </div>
@@ -169,13 +238,18 @@ export function ReportScreen() {
               <Group>
                 {parts.map((p, i) => {
                   const diff = p.value - p.prevValue;
+                  const catObj = data.categories.find((c) => c.id === p.id);
                   return (
                     <Row
                       key={p.id}
-                      title={p.name}
+                      title={catObj ? catName(catObj) : p.name}
                       leading={<span className="mt-1 inline-block h-3 w-3 rounded-pill" style={{ background: DONUT[i % DONUT.length] }} />}
                       trailing={<Amount value={p.value} currency={data.currency} />}
-                      sub={`${Math.round((p.value / total) * 100)}٪${p.prevValue > 0 ? ` · ${diff >= 0 ? "+" : "−"}${Math.round(Math.abs(diff))} عن السابق` : ""}`}
+                      sub={`${formatPercent(Math.round((p.value / total) * 100), numeralStyle, lang)}${
+                        p.prevValue > 0
+                          ? ` · ${diff >= 0 ? "+" : "−"}${formatNumber(Math.round(Math.abs(diff)), numeralStyle, lang)} ${lang === "en" ? "vs prior" : "عن السابق"}`
+                          : ""
+                      }`}
                     />
                   );
                 })}
@@ -185,16 +259,16 @@ export function ReportScreen() {
         )}
       </Section>
 
-      <Section title="أكثر الأشخاص ارتباطاً بالديون">
+      <Section title={lang === "en" ? "Top People by Debt Exposure" : "أكثر الأشخاص ارتباطاً بالديون"}>
         {report.debtPeople.length === 0 ? (
-          <p className="px-8 text-sub text-label-2">لا ديون نشطة حالياً.</p>
+          <p className="px-8 text-sub text-label-2">{lang === "en" ? "No active debts." : "لا ديون نشطة حالياً."}</p>
         ) : (
           <Group>
             {report.debtPeople.map((row) => (
               <Row
                 key={row.person.id}
                 title={<PersonName name={row.person.name} />}
-                sub={`${row.activeCount} دين نشط · لي ${Math.round(row.receivable)} · عليّ ${Math.round(row.payable)}`}
+                sub={`${formatNumber(row.activeCount, numeralStyle, lang)} ${lang === "en" ? "active" : "دين نشط"} · ${t("receivable")} ${formatNumber(Math.round(row.receivable), numeralStyle, lang)} · ${t("payable")} ${formatNumber(Math.round(row.payable), numeralStyle, lang)}`}
                 trailing={<Amount value={row.net} currency={data.currency} sign="auto" />}
                 chevron
                 onClick={() => openPerson(row.person.id)}
@@ -204,9 +278,11 @@ export function ReportScreen() {
         )}
       </Section>
 
-      <Section title="الفواتير والاستحقاقات القادمة">
+      <Section title={lang === "en" ? "Upcoming Bills & Installments" : "الفواتير والاستحقاقات القادمة"}>
         {report.upcomingBills.length === 0 ? (
-          <p className="px-8 text-sub text-label-2">لا توجد فواتير أو أقساط قادمة خلال 30 يوماً.</p>
+          <p className="px-8 text-sub text-label-2">
+            {lang === "en" ? "No upcoming bills or installments in the next 30 days." : "لا توجد فواتير أو أقساط قادمة خلال 30 يوماً."}
+          </p>
         ) : (
           <Group>
             {report.upcomingBills.map((b) => (
@@ -215,8 +291,16 @@ export function ReportScreen() {
                 title={b.title}
                 sub={
                   <>
-                    {b.kind === "recurring" ? "فاتورة متكررة" : b.personName ? <PersonName name={b.personName} /> : "دين"} ·{" "}
-                    {shortDate(b.due)}
+                    {b.kind === "recurring"
+                      ? lang === "en"
+                        ? "Recurring Bill"
+                        : "فاتورة متكررة"
+                      : b.personName
+                        ? <PersonName name={b.personName} />
+                        : lang === "en"
+                          ? "Debt"
+                          : "دين"}{" "}
+                    · {shortDate(b.due, lang, numeralStyle)}
                   </>
                 }
                 trailing={<Amount value={b.amount} currency={data.currency} sign={b.direction === "receivable" ? "plus" : "minus"} />}
@@ -230,7 +314,7 @@ export function ReportScreen() {
       <div className="mt-4 flex justify-center px-4">
         <span className="inline-flex items-center gap-1.5 text-caption text-label-2">
           <Download size={13} />
-          <span>جميع التقارير تُنشأ محلياً دون رفع أي بيانات</span>
+          <span>{lang === "en" ? "All reports are generated locally without uploading any data" : "جميع التقارير تُنشأ محلياً دون رفع أي بيانات"}</span>
         </span>
       </div>
     </div>
