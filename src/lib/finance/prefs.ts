@@ -145,31 +145,44 @@ export function applyAppearanceToDocument(
   root.dataset.appleTheme = theme;
   root.dataset.colorMode = mode;
 
+  const prefersDark =
+    mode === "dark" ||
+    (mode === "system" &&
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const lightBg: Record<AppleThemeId, string> = {
+    "liquid-glass": "#eef3fa",
+    "cupertino-classic": "#f5f5f7",
+    "titanium-pro": "#f1efe9",
+    "emerald-vault": "#edf5f1",
+    "midnight-indigo": "#eff0fa",
+    "desert-sand": "#f6f1eb",
+  };
+  const darkBg: Record<AppleThemeId, string> = {
+    "liquid-glass": "#05070c",
+    "cupertino-classic": "#000000",
+    "titanium-pro": "#0c0b0a",
+    "emerald-vault": "#040d0a",
+    "midnight-indigo": "#070816",
+    "desert-sand": "#100c09",
+  };
+  const bgHex = prefersDark ? darkBg[theme] : lightBg[theme];
   const metaTheme = document.querySelector('meta[name="theme-color"]');
   if (metaTheme) {
-    const prefersDark =
-      mode === "dark" ||
-      (mode === "system" &&
-        typeof window !== "undefined" &&
-        typeof window.matchMedia === "function" &&
-        window.matchMedia("(prefers-color-scheme: dark)").matches);
-    const lightBg: Record<AppleThemeId, string> = {
-      "liquid-glass": "#eef3fa",
-      "cupertino-classic": "#f5f5f7",
-      "titanium-pro": "#f1efe9",
-      "emerald-vault": "#edf5f1",
-      "midnight-indigo": "#eff0fa",
-      "desert-sand": "#f6f1eb",
-    };
-    const darkBg: Record<AppleThemeId, string> = {
-      "liquid-glass": "#05070c",
-      "cupertino-classic": "#000000",
-      "titanium-pro": "#0c0b0a",
-      "emerald-vault": "#040d0a",
-      "midnight-indigo": "#070816",
-      "desert-sand": "#100c09",
-    };
-    metaTheme.setAttribute("content", prefersDark ? darkBg[theme] : lightBg[theme]);
+    metaTheme.setAttribute("content", bgHex);
+  }
+  if (typeof window !== "undefined") {
+    const nativeBridge = (
+      window as Window & {
+        MizanNative?: { setSystemBarStyle?: (hexColor: string, darkIcons: boolean) => boolean };
+      }
+    ).MizanNative;
+    try {
+      nativeBridge?.setSystemBarStyle?.(bgHex, !prefersDark);
+    } catch {
+      // Ignore bridge errors outside Android WebView
+    }
   }
 }
 

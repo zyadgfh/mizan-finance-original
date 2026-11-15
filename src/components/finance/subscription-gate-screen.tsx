@@ -357,7 +357,7 @@ export function SubscriptionGateScreen({ reason }: { reason: SubscriptionBlockRe
           </div>
         ) : (
           /* Renewal / Resubmission Payment Form */
-          <form onSubmit={handleSubmitRenewal} className="space-y-3.5 pt-1 border-t border-[var(--sep)]">
+          <form onSubmit={handleSubmitRenewal} noValidate className="space-y-3.5 pt-1 border-t border-[var(--sep)]">
             <div className="font-bold text-[14px]">
               {reason === "pending_approval"
                 ? isAr

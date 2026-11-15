@@ -445,7 +445,7 @@ export function AuthScreen({
 
         {/* VIEW 1: SIGN IN */}
         {view === "signin" && (
-          <form onSubmit={submitSignIn} className="space-y-4">
+          <form onSubmit={submitSignIn} noValidate className="space-y-4">
             <div className="space-y-1.5">
               <label className="text-[12px] font-semibold text-[var(--label-2)] block">
                 {isAr ? "البريد الإلكتروني أو رقم الهاتف" : "Email or Phone Number"}
@@ -583,7 +583,7 @@ export function AuthScreen({
 
             {/* STEP 1: ACCOUNT CREDENTIALS + 4 AFFORDABLE PACKAGES */}
             {signupStep === "account" && (
-              <form onSubmit={handleProceedToPayment} className="space-y-3.5">
+              <form onSubmit={handleProceedToPayment} noValidate className="space-y-3.5">
                 <div className="space-y-1">
                   <label className="text-[12px] font-semibold text-[var(--label-2)] block">
                     {isAr ? "الاسم (اختياري)" : "Your Name (optional)"}
@@ -992,7 +992,7 @@ export function AuthScreen({
                   : "Reset link sent! Check your inbox."}
               </div>
             ) : (
-              <form onSubmit={submitForgotPassword} className="space-y-3.5">
+              <form onSubmit={submitForgotPassword} noValidate className="space-y-3.5">
                 <input
                   type="email"
                   dir="ltr"

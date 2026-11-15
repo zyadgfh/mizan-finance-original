@@ -4,15 +4,23 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
 import android.util.Base64;
+import android.view.View;
+import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import androidx.activity.OnBackPressedCallback;
 import androidx.core.content.FileProvider;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -27,6 +35,22 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
 
         captureIntentDeepLink(getIntent(), false);
+
+        // Ensure Android 15/16 (targetSdk 36) edge-to-edge system bars, cutouts,
+        // and IME soft keyboard never overlap WebView headers, tab bars, or inputs.
+        View rootContent = findViewById(android.R.id.content);
+        if (rootContent != null) {
+            ViewCompat.setOnApplyWindowInsetsListener(rootContent, (view, windowInsets) -> {
+                Insets bars = windowInsets.getInsets(
+                    WindowInsetsCompat.Type.systemBars()
+                        | WindowInsetsCompat.Type.displayCutout()
+                        | WindowInsetsCompat.Type.ime()
+                );
+                view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                return WindowInsetsCompat.CONSUMED;
+            });
+            ViewCompat.requestApplyInsets(rootContent);
+        }
 
         if (getBridge() != null && getBridge().getWebView() != null) {
             WebView wv = getBridge().getWebView();
@@ -171,6 +195,39 @@ public class MainActivity extends BridgeActivity {
                 }
             });
             return true;
+        }
+
+        @JavascriptInterface
+        @SuppressWarnings("deprecation")
+        public boolean setSystemBarStyle(String hexColor, final boolean darkIcons) {
+            try {
+                final int parsedColor = Color.parseColor(
+                    (hexColor == null || hexColor.trim().isEmpty()) ? "#05070c" : hexColor.trim()
+                );
+                runOnUiThread(() -> {
+                    try {
+                        Window window = getWindow();
+                        if (window == null) return;
+                        View rootContent = findViewById(android.R.id.content);
+                        if (rootContent != null) {
+                            rootContent.setBackgroundColor(parsedColor);
+                        }
+                        window.getDecorView().setBackgroundColor(parsedColor);
+                        window.setStatusBarColor(parsedColor);
+                        window.setNavigationBarColor(parsedColor);
+                        WindowInsetsControllerCompat controller =
+                            WindowCompat.getInsetsController(window, window.getDecorView());
+                        if (controller != null) {
+                            controller.setAppearanceLightStatusBars(darkIcons);
+                            controller.setAppearanceLightNavigationBars(darkIcons);
+                        }
+                    } catch (Exception ignored) {
+                    }
+                });
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
         }
     }
 }

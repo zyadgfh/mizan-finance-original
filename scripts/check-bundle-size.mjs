@@ -15,12 +15,14 @@ const TARGETS = [
     // Budget in bytes (gzip): keeps initial route & index tight while accounting for React/TanStack/GSAP/crypto
     maxLargestChunkGzipBytes: 185 * 1024,
     maxTotalJsGzipBytes: 520 * 1024,
+    minTotalCssRawBytes: 55 * 1024,
   },
   {
     name: "native",
     dirs: [path.join(ROOT, "native-dist", "assets")],
     maxLargestChunkGzipBytes: 210 * 1024,
     maxTotalJsGzipBytes: 460 * 1024,
+    minTotalCssRawBytes: 55 * 1024,
   },
 ];
 
@@ -106,6 +108,22 @@ export function runBundleCheck(onlyTarget) {
     if (report.totalJsGzip > target.maxTotalJsGzipBytes) {
       console.error(
         `[bundle-size] FAIL: ${target.name} total JS gzip (${formatKb(report.totalJsGzip)}) exceeds limit ${formatKb(target.maxTotalJsGzipBytes)}`,
+      );
+      failures++;
+    }
+    if (target.minTotalCssRawBytes && report.totalCssRaw < target.minTotalCssRawBytes) {
+      console.error(
+        `[bundle-size] FAIL: ${target.name} total CSS raw (${formatKb(report.totalCssRaw)}) is below minimum ${formatKb(target.minTotalCssRawBytes)} — Tailwind utility classes may be missing!`,
+      );
+      failures++;
+    }
+    const combinedCss = report.entries
+      .filter((e) => e.type === "css")
+      .map((e) => readFileSync(path.join(foundDir, e.file), "utf8"))
+      .join("\n");
+    if (!combinedCss.includes("@layer utilities") || !combinedCss.includes(".flex")) {
+      console.error(
+        `[bundle-size] FAIL: ${target.name} CSS bundle is missing Tailwind @layer utilities (.flex)!`,
       );
       failures++;
     }
