@@ -196,8 +196,10 @@ function makeTestSession(overrides = {}) {
     workspaces: [defaultTenant],
     activeTenantId: defaultTenant.id,
     plans: [
-      { code: "monthly", nameAr: "الخطة الشهرية", nameEn: "Monthly Plan", priceEgp: 19, billingInterval: "month", trialDays: 14, isActive: true },
-      { code: "yearly", nameAr: "الخطة السنوية", nameEn: "Yearly Plan", priceEgp: 149, billingInterval: "year", trialDays: 14, isActive: true },
+      { code: "monthly", nameAr: "باقة شهر واحد", nameEn: "1 Month Plan", priceEgp: 29, billingInterval: "month", durationDays: 30, trialDays: 0, sortOrder: 1, isActive: true },
+      { code: "quarterly", nameAr: "باقة 3 أشهر", nameEn: "3 Months Plan", priceEgp: 75, billingInterval: "quarter", durationDays: 90, trialDays: 0, sortOrder: 2, isActive: true },
+      { code: "semiannual", nameAr: "باقة 6 أشهر", nameEn: "6 Months Plan", priceEgp: 135, billingInterval: "semiannual", durationDays: 180, trialDays: 0, sortOrder: 3, isActive: true },
+      { code: "yearly", nameAr: "باقة سنة كاملة", nameEn: "1 Year Plan", priceEgp: 240, billingInterval: "year", durationDays: 365, trialDays: 0, sortOrder: 4, isActive: true },
     ],
     ...overrides,
   };
@@ -229,9 +231,9 @@ test("MizanRoot renders AuthScreen when unauthenticated and supports invite code
   render(React.createElement(MizanRoot, { skipSplash: true, requestedInviteCode: "MZN-TEAM-2026" }));
 
   await waitFor(() => {
-    assert.ok(screen.getByText("ميزان متعدد المساحات"));
+    assert.ok(screen.getByText("ميزان لإدارة أموالك"));
   });
-  const inviteInput = screen.getByPlaceholderText("MZN-XXXX-YYYY");
+  const inviteInput = screen.getByPlaceholderText("MZN-XXXX-XXXX");
   assert.equal(inviteInput.value, "MZN-TEAM-2026");
 });
 
@@ -372,7 +374,28 @@ test("Viewer role and suspended tenants enforce read-only banners and hide write
 
   render(React.createElement(MizanRoot, { skipSplash: true, initialSession: suspendedSession }));
   await waitFor(() => {
-    assert.ok(screen.getByText(/Workspace is suspended/i));
+    assert.ok(screen.getByText(/Account Suspended by Admin/i));
+  });
+
+  cleanup();
+  // Expired active subscription is automatically deactivated and locked
+  win.localStorage.setItem("mizan.tenant.t-exp.v1", JSON.stringify(seedData()));
+  const expiredSession = makeTestSession({
+    workspaces: [
+      {
+        ...viewerSession.workspaces[0],
+        id: "t-exp",
+        role: "owner",
+        subscriptionStatus: "active",
+        currentPeriodEnd: new Date(Date.now() - 60_000).toISOString(),
+      },
+    ],
+    activeTenantId: "t-exp",
+  });
+
+  render(React.createElement(MizanRoot, { skipSplash: true, initialSession: expiredSession }));
+  await waitFor(() => {
+    assert.ok(screen.getByText(/Subscription Period Ended — Account Auto-Deactivated/i));
   });
 });
 
@@ -473,19 +496,21 @@ test("Multi-tenant workspace switcher isolates data across workspaces and opens 
     assert.equal(screen.queryByText("Tenant One Coffee"), null);
   });
 
-  // Open Workspace Settings -> Plan tab shows symbolic 19 EGP / 149 EGP plans
+  // Open Workspace Settings -> Plan tab shows all 4 affordable packages
   fireEvent.click(screen.getByRole("button", { name: /Workspace & Members/i }));
   const planTab = await screen.findByRole("button", { name: "Plan" });
   fireEvent.click(planTab);
   await waitFor(() => {
-    assert.ok(screen.getByText(/Monthly Plan/));
-    assert.ok(screen.getByText(/Yearly Plan/));
+    assert.ok(screen.getAllByText(/1 Month/).length >= 1);
+    assert.ok(screen.getAllByText(/3 Months/).length >= 1);
+    assert.ok(screen.getAllByText(/6 Months/).length >= 1);
+    assert.ok(screen.getAllByText(/1 Year/).length >= 1);
   });
 
   // Open Super-Admin Console (visible because isSuperAdmin=true)
   fireEvent.click(screen.getByRole("button", { name: /Super-Admin/i }));
   await waitFor(() => {
-    assert.ok(screen.getByText(/Platform Super-Admin/));
+    assert.ok(screen.getByText(/Subscriptions & Billing Console/));
   });
 });
 
@@ -674,24 +699,50 @@ test("ErrorBoundary catches crashes with recovery UI and scrubs financial data f
   }
 });
 
-test("AuthScreen disables public sign-up and Google OAuth, enforcing owner-only accounts with forgot-password support", async () => {
+test("AuthScreen supports Email-or-Phone login, 2-step New Account Registration with 4 packages + payment proof, and Forgot Password", async () => {
   const { AuthScreen } = await viteServer.ssrLoadModule("/src/components/finance/auth-screen.tsx");
   const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
 
   updateUiPrefs({ language: "ar", numeralStyle: "latn", analyticsEnabled: true });
   render(React.createElement(AuthScreen, {}));
 
-  assert.ok(screen.getByText(/مالك المنصة فقط هو من ينشئ الحسابات/));
-  assert.equal(screen.queryByRole("tab", { name: /إنشاء حساب/i }), null);
+  // Sign-in tab accepts email or phone
+  assert.ok(screen.getByText(/البريد الإلكتروني أو رقم الهاتف/));
   assert.equal(screen.queryByText(/Google/i), null);
 
+  // Click "تسجيل حساب جديد" -> Step 1 shows Email/Phone, Password, and 4 packages (1m / 3m / 6m / 1y)
+  fireEvent.click(screen.getByRole("button", { name: "تسجيل حساب جديد" }));
+  await waitFor(() => {
+    assert.ok(screen.getByText(/اختر باقة الاشتراك المناسبة لك/));
+    assert.ok(screen.getAllByText(/شهر واحد/).length >= 1);
+    assert.ok(screen.getAllByText(/3 أشهر/).length >= 1);
+    assert.ok(screen.getAllByText(/6 أشهر/).length >= 1);
+    assert.ok(screen.getAllByText(/سنة كاملة/).length >= 1);
+  });
+
+  // Fill phone + password and advance to Step 2 ("الدفع")
+  fireEvent.change(screen.getByPlaceholderText("010xxxxxxxx أو name@mail.com"), {
+    target: { value: "01012345678" },
+  });
+  fireEvent.change(screen.getByPlaceholderText("••••••••"), {
+    target: { value: "secret123" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /الدفع \(/ }));
+
+  await waitFor(() => {
+    assert.ok(screen.getByText(/اضغط لرفع صورة التحويل/));
+    assert.ok(screen.getByText(/تم الدفع — إرسال طلب التفعيل للمالك/));
+  });
+
+  // Switch back to sign-in and verify forgot password
+  fireEvent.click(screen.getByRole("button", { name: /تسجيل الدخول/ }));
   fireEvent.click(screen.getByRole("button", { name: "نسيت كلمة المرور؟" }));
   await waitFor(() => {
     assert.ok(screen.getByText("استعادة كلمة المرور"));
   });
 });
 
-test("SuperAdminScreen renders owner-only account provisioning and payment confirmation tabs", async () => {
+test("SuperAdminScreen renders payment proof review, subscription expiration controls, 4-package pricing, and accounts directory", async () => {
   const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
   const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
   const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
@@ -708,16 +759,26 @@ test("SuperAdminScreen renders owner-only account provisioning and payment confi
   );
 
   await waitFor(() => {
-    assert.ok(screen.getByText(/إنشاء حساب مستخدم جديد/));
+    assert.ok(screen.getByText(/إدارة الاشتراكات والمدفوعات \(المالك\)/));
   });
 
-  fireEvent.click(screen.getByRole("button", { name: /المدفوعات/ }));
+  fireEvent.click(screen.getByRole("button", { name: /التحكم بالاشتراكات/ }));
   await waitFor(() => {
-    assert.ok(screen.getByText(/طلبات تأكيد الدفع/));
+    assert.ok(screen.getByText(/منتهي ومعطّل/));
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: /الباقات والدفع/ }));
+  await waitFor(() => {
+    assert.ok(screen.getByText(/أسعار الباقات الأربع/));
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: /الحسابات/ }));
+  await waitFor(() => {
+    assert.ok(screen.getByText(/إنشاء حساب مشترك يدوياً/));
   });
 });
 
-test("TenantSettingsScreen Billing tab shows manual payment reference submission for non-super-admins", async () => {
+test("TenantSettingsScreen Billing tab shows 4 packages and transfer screenshot renewal for subscribers", async () => {
   const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
   const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
   const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
@@ -737,7 +798,7 @@ test("TenantSettingsScreen Billing tab shows manual payment reference submission
   fireEvent.click(billingTab);
 
   await waitFor(() => {
-    assert.ok(screen.getByText(/تأكيد الدفع عبر إنستاباي أو فودافون كاش/));
+    assert.ok(screen.getByText(/تجديد الاشتراك ورفع إيصال التحويل/));
   });
 });
 

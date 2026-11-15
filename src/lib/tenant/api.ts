@@ -1,5 +1,6 @@
 import { getSupabaseClient, SUPABASE_ANON_KEY, SUPABASE_URL } from "../supabase/client.ts";
 import type { Currency, Data } from "../finance/types.ts";
+import { cleanDisplayContact, normalizeSubscriberIdentity } from "./identity.ts";
 import {
   enqueueTenantOutboxOps,
   loadTenantOutbox,
@@ -9,35 +10,49 @@ import {
   saveTenantSyncCursor,
   type RemoteTenantRecord,
 } from "./storage.ts";
-import type {
-  AdminManagedUser,
-  AdminTenantOverview,
-  AuditLogItem,
-  OutboxOp,
-  PaymentMethod,
-  PaymentRequestItem,
-  PaymentRequestStatus,
-  PlanCode,
-  PlatformBillingInfo,
-  SubscriptionPlan,
-  SubscriptionStatus,
-  SyncRejectedItem,
-  TenantInvite,
-  TenantKind,
-  TenantMember,
-  TenantRole,
-  TenantSummary,
-  TenantUser,
+import {
+  DEFAULT_SUBSCRIPTION_PLANS,
+  normalizePlanCode,
+  normalizeSubscriptionStatus,
+  type AdminManagedUser,
+  type AdminTenantOverview,
+  type AuditLogItem,
+  type BillingInterval,
+  type OutboxOp,
+  type PaymentMethod,
+  type PaymentRequestItem,
+  type PaymentRequestStatus,
+  type PaymentRequestType,
+  type PlanCode,
+  type PlatformBillingInfo,
+  type SubscriptionPlan,
+  type SubscriptionStatus,
+  type SyncRejectedItem,
+  type TenantInvite,
+  type TenantKind,
+  type TenantMember,
+  type TenantRole,
+  type TenantSummary,
+  type TenantUser,
 } from "./types.ts";
 
 function mapPlanRow(row: Record<string, unknown>): SubscriptionPlan {
+  const code = normalizePlanCode(row.code);
+  const rawInterval = String(row.billing_interval ?? "month");
+  const billingInterval: BillingInterval =
+    rawInterval === "year" || rawInterval === "semiannual" || rawInterval === "quarter"
+      ? rawInterval
+      : "month";
+  const defaultDays = code === "yearly" ? 365 : code === "semiannual" ? 180 : code === "quarterly" ? 90 : 30;
   return {
-    code: row.code === "yearly" ? "yearly" : "monthly",
+    code,
     nameAr: String(row.name_ar ?? ""),
     nameEn: String(row.name_en ?? ""),
     priceEgp: Number(row.price_egp ?? 0),
-    billingInterval: row.billing_interval === "year" ? "year" : "month",
-    trialDays: Number(row.trial_days ?? 14),
+    billingInterval,
+    durationDays: Number(row.duration_days ?? defaultDays),
+    trialDays: Number(row.trial_days ?? 0),
+    sortOrder: Number(row.sort_order ?? 1),
     isActive: row.is_active !== false,
   };
 }
@@ -51,9 +66,10 @@ function mapTenantRow(row: Record<string, unknown>, role: TenantRole): TenantSum
     mode: "cloud",
     baseCurrency: (row.base_currency as Currency) || "EGP",
     role,
-    planCode: row.plan_code === "yearly" ? "yearly" : "monthly",
-    subscriptionStatus: (row.subscription_status as SubscriptionStatus) || "trialing",
+    planCode: normalizePlanCode(row.plan_code),
+    subscriptionStatus: normalizeSubscriptionStatus(row.subscription_status),
     currentPeriodEnd: String(row.current_period_end ?? new Date().toISOString()),
+    autoDeactivatedAt: (row.auto_deactivated_at as string | null) ?? null,
     ownerId: String(row.owner_id),
     openingBalance: row.opening_balance !== undefined ? Number(row.opening_balance) : undefined,
     exchangeRates: (row.exchange_rates as Partial<Record<Currency, number>> | undefined) ?? undefined,
@@ -64,17 +80,30 @@ function mapTenantRow(row: Record<string, unknown>, role: TenantRole): TenantSum
 }
 
 function mapPaymentRequestRow(r: Record<string, unknown>): PaymentRequestItem {
+  const planCode = normalizePlanCode(r.plan_code);
+  const defaultDays =
+    planCode === "yearly" ? 365 : planCode === "semiannual" ? 180 : planCode === "quarterly" ? 90 : 30;
+  const submitterEmail = String(r.submitter_email ?? "");
+  const submitterContact = cleanDisplayContact(
+    submitterEmail,
+    null,
+    (r.submitter_contact as string | null) ?? submitterEmail,
+  );
   return {
     id: String(r.id),
     tenantId: String(r.tenant_id),
     tenantName: String(r.tenant_name ?? ""),
     submittedBy: String(r.submitted_by ?? ""),
-    submitterEmail: String(r.submitter_email ?? ""),
-    planCode: r.plan_code === "yearly" ? "yearly" : "monthly",
+    submitterEmail,
+    submitterContact,
+    requestType: r.request_type === "new_registration" ? ("new_registration" as PaymentRequestType) : "renewal",
+    planCode,
+    durationDays: Number(r.duration_days ?? defaultDays),
     amountEgp: Number(r.amount_egp ?? 0),
     paymentMethod: (r.payment_method as PaymentMethod) || "instapay",
     referenceCode: String(r.reference_code ?? ""),
     senderHandle: (r.sender_handle as string | null) ?? null,
+    proofPath: (r.proof_path as string | null) ?? null,
     notes: (r.notes as string | null) ?? null,
     status: (r.status as PaymentRequestStatus) || "pending",
     reviewedAt: (r.reviewed_at as string | null) ?? null,
@@ -83,20 +112,40 @@ function mapPaymentRequestRow(r: Record<string, unknown>): PaymentRequestItem {
   };
 }
 
-export async function signInWithEmailPassword(email: string, password: string): Promise<TenantUser> {
+export async function signInWithEmailPassword(identifier: string, password: string): Promise<TenantUser> {
+  const normalized = normalizeSubscriberIdentity(identifier);
+  if (!normalized) {
+    throw new Error("أدخل بريداً إلكترونياً صحيحاً أو رقم هاتف صحيح (مثل 01012345678)");
+  }
   const sb = getSupabaseClient();
-  const { data, error } = await sb.auth.signInWithPassword({ email: email.trim(), password });
-  if (error) throw new Error(error.message);
+  const { data, error } = await sb.auth.signInWithPassword({
+    email: normalized.authEmail,
+    password,
+  });
+  if (error) {
+    const lower = error.message.toLowerCase();
+    if (lower.includes("invalid login credentials")) {
+      throw new Error("البريد الإلكتروني / رقم الهاتف أو كلمة المرور غير صحيحة");
+    }
+    if (lower.includes("banned")) {
+      throw new Error("هذا الحساب موقوف حالياً، يرجى التواصل مع مالك المنصة");
+    }
+    throw new Error(error.message);
+  }
   if (!data.user) throw new Error("تعذّر تسجيل الدخول");
   return userFromAuth(data.user);
 }
 
 export async function requestPasswordResetEmail(email: string, redirectTo?: string): Promise<void> {
+  const normalized = normalizeSubscriberIdentity(email);
+  if (!normalized || normalized.kind !== "email") {
+    throw new Error("استعادة كلمة المرور عبر الرابط تتطلب بريداً إلكترونياً مسجلاً؛ لحسابات الهاتف تواصل مع إدارة المنصة");
+  }
   const sb = getSupabaseClient();
   const target =
     redirectTo ||
     (typeof window !== "undefined" ? `${window.location.origin}/` : "https://mizan-finance-rho.vercel.app/");
-  const { error } = await sb.auth.resetPasswordForEmail(email.trim(), { redirectTo: target });
+  const { error } = await sb.auth.resetPasswordForEmail(normalized.authEmail, { redirectTo: target });
   if (error) throw new Error(error.message);
 }
 
@@ -132,7 +181,7 @@ async function callAdminUsersFunction(
     const sb = getSupabaseClient();
     const { data } = await sb.auth.getSession();
     const token = data.session?.access_token;
-    if (!token) throw new Error("يجب تسجيل الدخول بصلاحية مالك المنصة أولاً");
+    if (!token) throw new Error("يجب تسجيل الدخول أولاً");
     headers.Authorization = `Bearer ${token}`;
   }
 
@@ -143,7 +192,7 @@ async function callAdminUsersFunction(
   });
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {
-    throw new Error(typeof json.error === "string" ? json.error : "فشل تنفيذ عملية الإدارة");
+    throw new Error(typeof json.error === "string" ? json.error : "تعذّر تنفيذ العملية، حاول مرة أخرى");
   }
   return json;
 }
@@ -165,6 +214,96 @@ export async function setupInitialPlatformOwner(input: {
   return signInWithEmailPassword(input.email, input.password);
 }
 
+export async function fetchPublicSignupConfig(): Promise<{
+  plans: SubscriptionPlan[];
+  billingInfo: PlatformBillingInfo;
+}> {
+  const sb = getSupabaseClient();
+  const [{ data: planRows }, billingInfo] = await Promise.all([
+    sb
+      .from("subscription_plans")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true }),
+    fetchPlatformBillingInfo(),
+  ]);
+
+  const plans =
+    planRows && planRows.length > 0
+      ? planRows.map((r) => mapPlanRow(r as Record<string, unknown>))
+      : DEFAULT_SUBSCRIPTION_PLANS;
+
+  return { plans, billingInfo };
+}
+
+export async function registerNewSubscriberWithPayment(input: {
+  identifier: string;
+  password: string;
+  displayName?: string;
+  planCode: PlanCode;
+  paymentMethod: "instapay" | "vodafone_cash";
+  senderHandle: string;
+  proofDataUrl: string;
+  notes?: string;
+}): Promise<TenantUser> {
+  await callAdminUsersFunction(
+    {
+      action: "register_subscriber",
+      identifier: input.identifier.trim(),
+      password: input.password,
+      displayName: input.displayName?.trim() || "",
+      planCode: input.planCode,
+      paymentMethod: input.paymentMethod,
+      senderHandle: input.senderHandle.trim(),
+      proofDataUrl: input.proofDataUrl,
+      notes: input.notes?.trim() || "",
+    },
+    false,
+  );
+
+  return signInWithEmailPassword(input.identifier, input.password);
+}
+
+export async function submitRenewalPaymentWithProof(input: {
+  tenantId: string;
+  planCode: PlanCode;
+  paymentMethod: PaymentMethod;
+  senderHandle: string;
+  proofDataUrl: string;
+  notes?: string;
+}): Promise<PaymentRequestItem> {
+  const res = await callAdminUsersFunction(
+    {
+      action: "submit_renewal_payment",
+      tenantId: input.tenantId,
+      planCode: input.planCode,
+      paymentMethod: input.paymentMethod,
+      senderHandle: input.senderHandle.trim(),
+      proofDataUrl: input.proofDataUrl,
+      notes: input.notes?.trim() || "",
+    },
+    true,
+  );
+  return mapPaymentRequestRow((res.request ?? {}) as Record<string, unknown>);
+}
+
+export async function getPaymentProofSignedUrl(proofPath: string): Promise<string | null> {
+  if (!proofPath) return null;
+  const sb = getSupabaseClient();
+  const { data, error } = await sb.storage
+    .from("mizan-payment-proofs")
+    .createSignedUrl(proofPath, 3600);
+  if (error || !data?.signedUrl) return null;
+  return data.signedUrl;
+}
+
+export async function enforceExpiredSubscriptionsNow(): Promise<number> {
+  const sb = getSupabaseClient();
+  const { data, error } = await sb.rpc("enforce_expired_subscriptions");
+  if (error) throw new Error(error.message);
+  return Number(data ?? 0);
+}
+
 export async function signOutSupabase(): Promise<void> {
   const sb = getSupabaseClient();
   await sb.auth.signOut();
@@ -176,14 +315,20 @@ export function userFromAuth(u: {
   user_metadata?: Record<string, unknown>;
 }): TenantUser {
   const meta = u.user_metadata ?? {};
-  const email = u.email ?? "";
+  const rawEmail = u.email ?? "";
+  const phone = typeof meta.phone === "string" ? meta.phone : null;
+  const contactDisplay = cleanDisplayContact(
+    rawEmail,
+    phone,
+    typeof meta.contact_display === "string" ? meta.contact_display : null,
+  );
   const displayName =
     (typeof meta.display_name === "string" && meta.display_name.trim()) ||
     (typeof meta.full_name === "string" && meta.full_name.trim()) ||
-    email.split("@")[0] ||
-    "مستخدم ميزان";
+    contactDisplay.split("@")[0] ||
+    "مشترك ميزان";
   const avatarUrl = typeof meta.avatar_url === "string" ? meta.avatar_url : undefined;
-  return { id: u.id, email, displayName, avatarUrl };
+  return { id: u.id, email: contactDisplay, phone, displayName, avatarUrl };
 }
 
 export async function fetchMyWorkspaceBundle(user: TenantUser): Promise<{
@@ -196,6 +341,7 @@ export async function fetchMyWorkspaceBundle(user: TenantUser): Promise<{
 
   let isSuperAdmin = false;
   try {
+    // Also triggers enforce_expired_subscriptions() server-side on every load!
     const { data: adminFlag } = await sb.rpc("bootstrap_first_super_admin");
     isSuperAdmin = Boolean(adminFlag);
   } catch {
@@ -203,8 +349,12 @@ export async function fetchMyWorkspaceBundle(user: TenantUser): Promise<{
   }
 
   const [{ data: profile }, { data: planRows }, { data: memberRows, error: memberErr }] = await Promise.all([
-    sb.from("profiles").select("display_name, email, avatar_url").eq("id", user.id).maybeSingle(),
-    sb.from("subscription_plans").select("*").order("price_egp", { ascending: true }),
+    sb
+      .from("profiles")
+      .select("display_name, email, phone, contact_display, avatar_url")
+      .eq("id", user.id)
+      .maybeSingle(),
+    sb.from("subscription_plans").select("*").order("sort_order", { ascending: true }),
     sb
       .from("tenant_members")
       .select("role, tenants!inner(*)")
@@ -216,14 +366,24 @@ export async function fetchMyWorkspaceBundle(user: TenantUser): Promise<{
     throw new Error(memberErr.message);
   }
 
+  const cleanEmail = cleanDisplayContact(
+    (profile?.email as string | undefined) ?? user.email,
+    (profile?.phone as string | null | undefined) ?? user.phone ?? null,
+    (profile?.contact_display as string | null | undefined) ?? null,
+  );
+
   const resolvedUser: TenantUser = {
     ...user,
     displayName: (profile?.display_name as string) || user.displayName,
-    email: (profile?.email as string) || user.email,
+    email: cleanEmail || user.email,
+    phone: (profile?.phone as string | null | undefined) ?? user.phone ?? null,
     avatarUrl: (profile?.avatar_url as string | undefined) || user.avatarUrl,
   };
 
-  const plans = (planRows ?? []).map((r) => mapPlanRow(r as Record<string, unknown>));
+  const plans =
+    planRows && planRows.length > 0
+      ? planRows.map((r) => mapPlanRow(r as Record<string, unknown>))
+      : DEFAULT_SUBSCRIPTION_PLANS;
   const workspaces: TenantSummary[] = [];
 
   for (const row of memberRows ?? []) {
@@ -296,7 +456,7 @@ export async function fetchTenantMembers(tenantId: string): Promise<TenantMember
     userId: String(m.user_id),
     role: m.role as TenantRole,
     displayName: String(m.display_name ?? ""),
-    email: String(m.email ?? ""),
+    email: cleanDisplayContact(String(m.email ?? "")),
     joinedAt: String(m.joined_at),
   }));
 }
@@ -429,7 +589,6 @@ export async function activateTenantPlan(tenantId: string, planCode: PlanCode): 
   return mapTenantRow(data as Record<string, unknown>, "owner");
 }
 
-// Platform Billing Info & Manual Payment Confirmation Requests
 export async function fetchPlatformBillingInfo(): Promise<PlatformBillingInfo> {
   const sb = getSupabaseClient();
   const { data, error } = await sb.from("platform_billing_info").select("*").eq("id", 1).maybeSingle();
@@ -438,8 +597,10 @@ export async function fetchPlatformBillingInfo(): Promise<PlatformBillingInfo> {
       instapayHandle: "",
       vodafoneCashNumber: "",
       bankDetails: "",
-      instructionsAr: "حوّل قيمة الباقة عبر إنستاباي أو فودافون كاش ثم أدخل رقم العملية المرجعي ليعتمدها مالك المنصة.",
-      instructionsEn: "Transfer the plan amount via InstaPay or Vodafone Cash, then submit the reference code for approval.",
+      instructionsAr:
+        "حوّل قيمة الباقة عبر إنستاباي أو فودافون كاش ثم اكتب الرقم المحوّل منه أو اسم مستخدم إنستا باي وارفع صورة التحويل لتفعيل حسابك.",
+      instructionsEn:
+        "Transfer the package amount via InstaPay or Vodafone Cash, enter your sender number/IPA handle, and upload the transfer screenshot.",
       updatedAt: new Date().toISOString(),
     };
   }
@@ -475,6 +636,7 @@ export async function submitPaymentRequest(input: {
   referenceCode: string;
   senderHandle?: string;
   notes?: string;
+  proofPath?: string;
 }): Promise<PaymentRequestItem> {
   const sb = getSupabaseClient();
   const { data, error } = await sb.rpc("submit_payment_request", {
@@ -482,8 +644,9 @@ export async function submitPaymentRequest(input: {
     p_plan_code: input.planCode,
     p_payment_method: input.paymentMethod,
     p_reference_code: input.referenceCode.trim(),
-    p_sender_handle: input.senderHandle?.trim() || null,
+    p_sender_handle: input.senderHandle?.trim() || input.referenceCode.trim(),
     p_notes: input.notes?.trim() || null,
+    p_proof_path: input.proofPath || null,
   });
   if (error) throw new Error(error.message);
   return mapPaymentRequestRow(data as Record<string, unknown>);
@@ -491,7 +654,7 @@ export async function submitPaymentRequest(input: {
 
 export async function listPaymentRequests(tenantId?: string): Promise<PaymentRequestItem[]> {
   const sb = getSupabaseClient();
-  let query = sb.from("payment_requests").select("*").order("created_at", { ascending: false }).limit(100);
+  let query = sb.from("payment_requests").select("*").order("created_at", { ascending: false }).limit(150);
   if (tenantId) query = query.eq("tenant_id", tenantId);
   const { data, error } = await query;
   if (error) throw new Error(error.message);
@@ -653,7 +816,7 @@ export function queueOutboxOperations(
   return enqueueTenantOutboxOps(tenantId, ops, storage).length;
 }
 
-// Super-Admin APIs (Tenants & Owner-Only User Provisioning)
+// Super-Admin APIs (Subscriptions, Payment Proofs & User Accounts)
 export async function adminListTenants(): Promise<AdminTenantOverview[]> {
   const sb = getSupabaseClient();
   const { data, error } = await sb.rpc("admin_list_tenants");
@@ -664,10 +827,14 @@ export async function adminListTenants(): Promise<AdminTenantOverview[]> {
     name: String(r.name),
     kind: (r.kind as TenantKind) || "personal",
     baseCurrency: (r.base_currency as Currency) || "EGP",
-    planCode: r.plan_code === "yearly" ? "yearly" : "monthly",
-    subscriptionStatus: (r.subscription_status as SubscriptionStatus) || "trialing",
+    planCode: normalizePlanCode(r.plan_code),
+    subscriptionStatus: normalizeSubscriptionStatus(r.subscription_status),
     currentPeriodEnd: String(r.current_period_end),
-    ownerEmail: String(r.owner_email ?? ""),
+    autoDeactivatedAt: (r.auto_deactivated_at as string | null) ?? null,
+    ownerId: r.owner_id ? String(r.owner_id) : undefined,
+    ownerName: String(r.owner_name ?? "مشترك"),
+    ownerEmail: cleanDisplayContact(String(r.owner_email ?? ""), (r.owner_phone as string | null) ?? null),
+    ownerPhone: String(r.owner_phone ?? ""),
     memberCount: Number(r.member_count ?? 0),
     recordCount: Number(r.record_count ?? 0),
     createdAt: String(r.created_at),
@@ -679,6 +846,7 @@ export async function adminUpdateTenantSubscription(input: {
   planCode?: PlanCode;
   status?: SubscriptionStatus;
   extendDays?: number;
+  exactPeriodEnd?: string | null;
 }): Promise<void> {
   const sb = getSupabaseClient();
   const { error } = await sb.rpc("admin_update_tenant_subscription", {
@@ -686,6 +854,7 @@ export async function adminUpdateTenantSubscription(input: {
     p_plan_code: input.planCode ?? null,
     p_status: input.status ?? null,
     p_extend_days: input.extendDays ?? 0,
+    p_exact_period_end: input.exactPeriodEnd ?? null,
   });
   if (error) throw new Error(error.message);
 }
@@ -703,14 +872,22 @@ export async function adminListUsers(): Promise<AdminManagedUser[]> {
   const res = await callAdminUsersFunction({ action: "list_users" });
   return ((res.users ?? []) as Record<string, unknown>[]).map((u) => ({
     id: String(u.id),
-    email: String(u.email ?? ""),
+    email: cleanDisplayContact(String(u.email ?? ""), (u.phone as string | null) ?? null),
+    phone: (u.phone as string | null) ?? null,
     displayName: String(u.displayName ?? ""),
     isSuperAdmin: Boolean(u.isSuperAdmin),
     banned: Boolean(u.banned),
     createdAt: String(u.createdAt ?? ""),
     lastSignInAt: (u.lastSignInAt as string | null) ?? null,
     workspaces: Array.isArray(u.workspaces)
-      ? (u.workspaces as Array<{ tenantId: string; name: string; slug: string; role: string }>)
+      ? (u.workspaces as Array<{
+          tenantId: string;
+          name: string;
+          slug: string;
+          role: string;
+          subscriptionStatus?: string;
+          currentPeriodEnd?: string;
+        }>)
       : [],
   }));
 }
@@ -724,7 +901,7 @@ export async function adminCreateUserAccount(input: {
   workspaceKind?: TenantKind;
   baseCurrency?: Currency;
   planCode?: PlanCode;
-  subscriptionStatus?: "active" | "trialing";
+  subscriptionStatus?: "active" | "trialing" | "pending_approval";
   existingTenantId?: string;
   existingRole?: Exclude<TenantRole, "owner">;
 }): Promise<{ user: { id: string; email: string; displayName: string }; tenantId: string | null }> {
