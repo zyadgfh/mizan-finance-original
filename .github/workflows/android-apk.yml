@@ -79,10 +79,9 @@ jobs:
 
       - name: Build Android Signed Release & Debug APKs
         working-directory: android
-        env:
-          ANDROID_VERSION_CODE: ${{ 100 + github.run_number }}
-          ANDROID_VERSION_NAME: 2.0.${{ github.run_number }}
         run: |
+          export ANDROID_VERSION_CODE=$((100 + ${GITHUB_RUN_NUMBER:-20}))
+          export ANDROID_VERSION_NAME="2.0.${GITHUB_RUN_NUMBER:-20}"
           chmod +x gradlew
           ./gradlew assembleRelease assembleDebug --no-daemon
 
