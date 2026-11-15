@@ -39,38 +39,41 @@ security definer
 set search_path = public
 as $$
 declare
+  v_rec record;
   v_count integer := 0;
 begin
   perform set_config('mizan.internal_billing_op', '1', true);
 
-  with expired_rows as (
-    update public.tenants t
-    set subscription_status = 'expired',
-        updated_at = now()
-    where t.subscription_status in ('active', 'trialing')
+  for v_rec in
+    select t.id, t.name
+    from public.tenants t
+    where t.deleted_at is null
+      and t.subscription_status in ('active', 'trialing', 'past_due')
       and t.current_period_end <= now()
       and not exists (
         select 1 from public.platform_admins pa where pa.user_id = t.owner_id
       )
-    returning t.id, t.owner_id, t.plan_code, t.current_period_end
-  ),
-  logged as (
-    insert into public.tenant_audit_logs (tenant_id, actor_id, action, entity_type, details)
-    select
-      er.id,
-      null,
-      'subscription.auto_expired',
-      'subscription',
-      jsonb_build_object(
-        'plan_code', er.plan_code,
-        'expired_at', er.current_period_end
-      )
-    from expired_rows er
-    returning 1
-  )
-  select count(*)::integer into v_count from expired_rows;
+    for update skip locked
+  loop
+    update public.tenants
+    set subscription_status = 'expired',
+        auto_deactivated_at = now(),
+        updated_at = now()
+    where id = v_rec.id;
 
-  return coalesce(v_count, 0);
+    insert into public.tenant_audit_logs (tenant_id, actor_id, actor_name, action, summary)
+    values (
+      v_rec.id,
+      null,
+      'System',
+      'billing.auto_expired',
+      'انتهت مدة الاشتراك وتم تعطيل حساب المشترك تلقائياً'
+    );
+
+    v_count := v_count + 1;
+  end loop;
+
+  return v_count;
 end;
 $$;
 
