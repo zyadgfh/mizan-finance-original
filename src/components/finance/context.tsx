@@ -15,7 +15,9 @@ export type Route =
   | { name: "recurring" }
   | { name: "notifications" }
   | { name: "drive" }
-  | { name: "security" };
+  | { name: "security" }
+  | { name: "tenant" }
+  | { name: "admin" };
 
 export type TxPrefill = {
   kind?: TxKind;
@@ -41,7 +43,8 @@ export type SheetState =
   | { kind: "pin" }
   | { kind: "wallet"; id?: string }
   | { kind: "search" }
-  | { kind: "csv-import" };
+  | { kind: "csv-import" }
+  | { kind: "workspace-switcher" };
 
 export type MizanUI = {
   tab: Tab;
@@ -59,6 +62,8 @@ export type MizanUI = {
   openNotifications: () => void;
   openDrive: () => void;
   openSecurity: () => void;
+  openTenant: () => void;
+  openAdmin: () => void;
   openDebtsFiltered: (filter: DebtTabFilter) => void;
   openLedgerFiltered: (categoryId?: string) => void;
   debtFilter: DebtTabFilter;

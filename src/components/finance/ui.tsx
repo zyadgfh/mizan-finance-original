@@ -163,12 +163,14 @@ export function PillButton({
   tone = "tint",
   type = "button",
   disabled,
+  className,
 }: {
   children: ReactNode;
   onClick?: () => void;
   tone?: "tint" | "gray" | "plain" | "danger";
   type?: "button" | "submit";
   disabled?: boolean;
+  className?: string;
 }) {
   const tones = {
     tint: "bg-tint text-on-tint shadow-sm",
@@ -184,6 +186,7 @@ export function PillButton({
       className={cn(
         "inline-flex min-h-11 items-center justify-center gap-1 rounded-pill px-4 text-sub font-semibold active:opacity-80 disabled:opacity-40",
         tones[tone],
+        className,
       )}
     >
       {children}

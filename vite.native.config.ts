@@ -17,5 +17,15 @@ export default defineConfig({
     outDir: resolve(projectRoot, "native-dist"),
     emptyOutDir: true,
     target: "es2020",
+    rolldownOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("@supabase/")) return "supabase-vendor";
+          if (id.includes("node_modules/react") || id.includes("node_modules/react-dom")) {
+            return "react-vendor";
+          }
+        },
+      },
+    },
   },
 });

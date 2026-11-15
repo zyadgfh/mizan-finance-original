@@ -1,4 +1,19 @@
-import { Cloud, ChevronLeft, ChevronRight, Eye, EyeOff, FileSpreadsheet, Globe, Search, Shield, Sparkles, Terminal } from "lucide-react";
+import {
+  Building2,
+  Cloud,
+  ChevronLeft,
+  ChevronRight,
+  Crown,
+  Eye,
+  EyeOff,
+  FileSpreadsheet,
+  Globe,
+  LogOut,
+  Search,
+  Shield,
+  Sparkles,
+  Terminal,
+} from "lucide-react";
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { IconTile } from "@/components/finance/icons";
@@ -64,6 +79,8 @@ import { updateSecuritySettings, useSecuritySettings } from "@/lib/finance/secur
 import { exportCsv, exportData, exportDataAsync, importDataAsync, pickFinanceData, useFinance } from "@/lib/finance/store";
 import type { Currency, Debt, Tx } from "@/lib/finance/types";
 import { CURRENCIES } from "@/lib/finance/types";
+import { useOptionalTenant } from "@/lib/tenant/context";
+import { formatRoleLabel, formatTenantKindLabel } from "@/lib/tenant/types";
 
 function MonthSwitch() {
   const { month, shiftMonth } = useMizan();
@@ -614,6 +631,7 @@ function TxRow({ tx, onOpen }: { tx: Tx; onOpen: () => void }) {
     : "";
   const flags = [
     foreignTag,
+    tx.createdByName ? tx.createdByName : "",
     tx.reported === false ? (lang === "en" ? "Excluded" : "خارج الملخص") : "",
     tx.receiptId ? (lang === "en" ? "Receipt" : "إيصال") : "",
   ]
@@ -1270,8 +1288,11 @@ export function MoreScreen() {
     openNotifications,
     openDrive,
     openSecurity,
+    openTenant,
+    openAdmin,
     pinHash,
   } = useMizan();
+  const tenant = useOptionalTenant();
   const data = useFinance();
   const { lang, numeralStyle, analyticsEnabled, t, catName, currencyName } = useI18n();
   const categories = data.categories;
@@ -1315,6 +1336,60 @@ export function MoreScreen() {
           {lang === "en" ? "Everything stays saved locally on this device first." : "كل شيء يُحفظ على هذا الجهاز أولاً."}
         </p>
       </div>
+
+      {tenant?.activeTenant ? (
+        <Section title={lang === "en" ? "Workspace & Multi-Tenant" : "المساحة والمستأجرون والاشتراك"}>
+          <Group sep="icon">
+            <Row
+              leading={
+                <span className="icon-tile" style={{ background: "var(--tint)" }}>
+                  <Building2 size={16} />
+                </span>
+              }
+              title={tenant.activeTenant.name}
+              sub={`${formatTenantKindLabel(tenant.activeTenant.kind, lang)} · ${formatRoleLabel(tenant.activeTenant.role, lang)} · ${tenant.workspaces.length} ${lang === "en" ? "workspaces" : "مساحات"}`}
+              chevron
+              onClick={() => openSheet({ kind: "workspace-switcher" })}
+            />
+            <Row
+              title={lang === "en" ? "Workspace Settings, Members & Plan" : "إعدادات المساحة والأعضاء والاشتراك"}
+              sub={
+                tenant.pendingOpsCount > 0
+                  ? `${tenant.pendingOpsCount} ${lang === "en" ? "pending sync ops" : "عمليات بانتظار المزامنة"}`
+                  : lang === "en"
+                    ? "Invites, roles, monthly/yearly plan & audit log"
+                    : "الدعوات، الصلاحيات، الخطة الشهرية/السنوية وسجل النشاط"
+              }
+              chevron
+              onClick={openTenant}
+            />
+            {tenant.isSuperAdmin ? (
+              <Row
+                leading={
+                  <span className="icon-tile" style={{ background: "var(--orange)" }}>
+                    <Crown size={16} />
+                  </span>
+                }
+                title={lang === "en" ? "Platform Super-Admin Console" : "لوحة تحكم المنصة (Super-Admin)"}
+                sub={lang === "en" ? "Tenants, symbolic pricing & suspension" : "إدارة المستأجرين والخطط وحالة التفعيل"}
+                chevron
+                onClick={openAdmin}
+              />
+            ) : null}
+            <Row
+              leading={
+                <span className="icon-tile" style={{ background: "var(--expense)" }}>
+                  <LogOut size={16} />
+                </span>
+              }
+              title={lang === "en" ? "Sign Out" : "تسجيل الخروج"}
+              sub={tenant.user?.email ?? ""}
+              destructive
+              onClick={() => void tenant.signOut()}
+            />
+          </Group>
+        </Section>
+      ) : null}
 
       <Section title={t("languageSection")} footer={t("languageFooter")}>
         <Group sep="icon">

@@ -36,7 +36,15 @@ export type Category = {
   custom?: boolean;
 };
 
-export type Tx = {
+export type ActorMeta = {
+  updatedAt?: number;
+  createdBy?: string;
+  createdByName?: string;
+  updatedBy?: string;
+  updatedByName?: string;
+};
+
+export type Tx = ActorMeta & {
   id: string;
   kind: TxKind;
   amount: number;
@@ -58,7 +66,7 @@ export type Tx = {
   createdAt: number;
 };
 
-export type Person = {
+export type Person = ActorMeta & {
   id: string;
   name: string;
   phone: string;
@@ -66,7 +74,7 @@ export type Person = {
   createdAt: number;
 };
 
-export type Debt = {
+export type Debt = ActorMeta & {
   id: string;
   personId: string;
   direction: DebtDirection;
@@ -95,7 +103,7 @@ export type DebtAuditEntry = {
   afterDate?: string;
 };
 
-export type Payment = {
+export type Payment = ActorMeta & {
   id: string;
   debtId: string;
   amount: number;
@@ -106,12 +114,12 @@ export type Payment = {
   createdAt: number;
 };
 
-export type Budget = {
+export type Budget = ActorMeta & {
   categoryId: string;
   limit: number;
 };
 
-export type Wallet = {
+export type Wallet = ActorMeta & {
   id: string;
   name: string;
   kind: WalletKind;
@@ -119,7 +127,7 @@ export type Wallet = {
   createdAt: number;
 };
 
-export type Transfer = {
+export type Transfer = ActorMeta & {
   id: string;
   fromId: string;
   toId: string;
@@ -129,7 +137,7 @@ export type Transfer = {
   createdAt: number;
 };
 
-export type Recurring = {
+export type Recurring = ActorMeta & {
   id: string;
   kind: TxKind;
   amount: number;
@@ -142,7 +150,7 @@ export type Recurring = {
   createdAt: number;
 };
 
-export type Goal = {
+export type Goal = ActorMeta & {
   id: string;
   name: string;
   target: number;
@@ -152,7 +160,7 @@ export type Goal = {
   createdAt: number;
 };
 
-export type GoalMove = {
+export type GoalMove = ActorMeta & {
   id: string;
   goalId: string;
   walletId: string;
