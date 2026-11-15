@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@source "./";
+@source "../native";
 @import "sonner/dist/styles.css";
 
 /* ==========================================================================
