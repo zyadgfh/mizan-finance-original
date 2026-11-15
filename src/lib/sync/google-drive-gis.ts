@@ -1,22 +1,50 @@
-import { createDriveSyncController, type DriveSyncAdapter, type DriveSyncRecord } from "./drive-sync.ts";
+import type { Data } from "../finance/types.ts";
+import {
+  decryptBackupPayload,
+  encryptBackupPayload,
+  isEncryptedBackupEnvelope,
+  validateBackupJsonObject,
+  type EncryptedBackupEnvelope,
+} from "./crypto-backup.ts";
+import { createDriveSyncController, type DriveSyncAdapter, type DriveSyncRecord, SYNC_VERSION } from "./drive-sync.ts";
 
 export const GSI_SCRIPT_SRC = "https://accounts.google.com/gsi/client";
 export const DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 export const DRIVE_BACKUP_FILENAME = "mizan-backup.json";
+export const DRIVE_SNAPSHOT_PREFIX = "mizan-snapshot-";
+const MAX_CLOUD_SNAPSHOTS = 8;
 
 const CLIENT_ID_STORAGE_KEY = "mizan.drive.clientId";
 const PREFS_STORAGE_KEY = "mizan.drive.prefs";
+const ENC_PASS_KEY = "mizan.drive.enc";
 
 export type DriveSyncPrefs = {
   autoSync: boolean;
   lastSyncedAt?: number;
+  encryptBackup?: boolean;
+};
+
+export type DriveBackupSnapshot = {
+  id: string;
+  name: string;
+  modifiedTime: string;
+  sizeBytes?: number;
 };
 
 type DriveFileMeta = {
   id: string;
+  name?: string;
   headRevisionId?: string;
   version?: string | number;
   modifiedTime?: string;
+  size?: string;
+};
+
+type EncryptedSyncWireRecord = {
+  version: typeof SYNC_VERSION;
+  updatedAt: number;
+  deviceId: string;
+  encryptedPayload: EncryptedBackupEnvelope;
 };
 
 export type GoogleTokenResponse = {
@@ -95,9 +123,41 @@ export function loadDriveSyncPrefs(
     return {
       autoSync: Boolean(parsed.autoSync),
       lastSyncedAt: typeof parsed.lastSyncedAt === "number" ? parsed.lastSyncedAt : undefined,
+      encryptBackup: Boolean(parsed.encryptBackup),
     };
   } catch {
     return { autoSync: false };
+  }
+}
+
+export function getDriveEncryptionPassphrase(
+  storage: Storage | undefined = typeof sessionStorage !== "undefined"
+    ? sessionStorage
+    : typeof localStorage !== "undefined"
+      ? localStorage
+      : undefined,
+): string {
+  try {
+    return storage?.getItem(ENC_PASS_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function setDriveEncryptionPassphrase(
+  passphrase: string,
+  storage: Storage | undefined = typeof sessionStorage !== "undefined"
+    ? sessionStorage
+    : typeof localStorage !== "undefined"
+      ? localStorage
+      : undefined,
+): void {
+  const trimmed = passphrase.trim();
+  try {
+    if (trimmed) storage?.setItem(ENC_PASS_KEY, trimmed);
+    else storage?.removeItem(ENC_PASS_KEY);
+  } catch {
+    /* ignore storage unavailable */
   }
 }
 
@@ -288,6 +348,7 @@ export function createGoogleDriveAppDataAdapter(opts: {
   getAccessToken: () => Promise<string>;
   fetchImpl?: typeof fetch;
   fileName?: string;
+  getPassphrase?: () => string;
 }): DriveSyncAdapter {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const fileName = opts.fileName ?? DRIVE_BACKUP_FILENAME;
@@ -344,6 +405,29 @@ export function createGoogleDriveAppDataAdapter(opts: {
       if (!parsed || typeof parsed !== "object") {
         throw new Error("Invalid remote sync payload");
       }
+
+      const maybeEnc = parsed as Partial<EncryptedSyncWireRecord>;
+      if (maybeEnc.encryptedPayload && isEncryptedBackupEnvelope(maybeEnc.encryptedPayload)) {
+        const pass = opts.getPassphrase?.()?.trim() ?? "";
+        if (!pass) throw new Error("encrypted: missing_passphrase");
+        let decryptedJson: string;
+        try {
+          decryptedJson = await decryptBackupPayload(maybeEnc.encryptedPayload, pass);
+        } catch {
+          throw new Error("wrong_passphrase");
+        }
+        const data = JSON.parse(decryptedJson) as Data;
+        const validation = validateBackupJsonObject(data);
+        if (!validation.ok) throw new Error("Invalid remote sync payload");
+        return {
+          version: SYNC_VERSION,
+          updatedAt: typeof maybeEnc.updatedAt === "number" ? maybeEnc.updatedAt : Date.now(),
+          deviceId: typeof maybeEnc.deviceId === "string" ? maybeEnc.deviceId : "encrypted-device",
+          data,
+          revision: revisionOf(meta),
+        };
+      }
+
       const record = parsed as DriveSyncRecord;
       return { ...record, revision: revisionOf(meta) };
     },
@@ -361,7 +445,16 @@ export function createGoogleDriveAppDataAdapter(opts: {
         throw new Error("412 revision conflict");
       }
 
-      const jsonBody = JSON.stringify({ ...record, revision: undefined });
+      const pass = opts.getPassphrase?.()?.trim() ?? "";
+      const wireRecord = pass
+        ? ({
+            version: SYNC_VERSION,
+            updatedAt: record.updatedAt,
+            deviceId: record.deviceId,
+            encryptedPayload: await encryptBackupPayload(JSON.stringify(record.data), pass),
+          } satisfies EncryptedSyncWireRecord)
+        : { ...record, revision: undefined };
+      const jsonBody = JSON.stringify(wireRecord);
 
       const isUpdate = Boolean(cachedFileId);
       const metadata = isUpdate
@@ -402,6 +495,7 @@ export function getGoogleDriveSyncController(clientId: string) {
     sharedController = createDriveSyncController(
       createGoogleDriveAppDataAdapter({
         getAccessToken: () => requestGoogleDriveToken(clientId),
+        getPassphrase: () => getDriveEncryptionPassphrase(),
       }),
     );
   }
@@ -411,4 +505,119 @@ export function getGoogleDriveSyncController(clientId: string) {
 export function resetGoogleDriveSyncController() {
   sharedController = null;
   sharedClientId = "";
+}
+
+export async function listDriveBackupSnapshots(
+  clientId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<DriveBackupSnapshot[]> {
+  const token = await requestGoogleDriveToken(clientId);
+  const q = encodeURIComponent(`name contains '${DRIVE_SNAPSHOT_PREFIX}' and trashed=false`);
+  const url =
+    `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}` +
+    `&fields=files(id,name,modifiedTime,size)&orderBy=modifiedTime%20desc&pageSize=15`;
+  const res = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 401 || res.status === 403) {
+    clearCachedGoogleToken();
+    throw new Error(`${res.status} unauthorized`);
+  }
+  if (!res.ok) throw new Error(`Drive snapshots list failed: HTTP ${res.status}`);
+  const payload = (await res.json()) as { files?: DriveFileMeta[] };
+  return (payload.files ?? []).map((f) => ({
+    id: f.id,
+    name: f.name ?? DRIVE_SNAPSHOT_PREFIX,
+    modifiedTime: f.modifiedTime ?? "",
+    sizeBytes: f.size ? Number(f.size) : undefined,
+  }));
+}
+
+export async function createDriveBackupSnapshot(
+  clientId: string,
+  data: Data,
+  updatedAt: number,
+  passphrase = getDriveEncryptionPassphrase(),
+  fetchImpl: typeof fetch = fetch,
+): Promise<DriveBackupSnapshot> {
+  const token = await requestGoogleDriveToken(clientId);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const name = `${DRIVE_SNAPSHOT_PREFIX}${stamp}.json`;
+  const pass = passphrase.trim();
+  const payload = pass
+    ? {
+        version: SYNC_VERSION,
+        updatedAt,
+        deviceId: "snapshot",
+        encryptedPayload: await encryptBackupPayload(JSON.stringify(data), pass),
+      }
+    : {
+        version: SYNC_VERSION,
+        updatedAt,
+        deviceId: "snapshot",
+        data,
+      };
+  const { contentType, body } = buildMultipartRelated(
+    { name, mimeType: "application/json", parents: ["appDataFolder"] },
+    JSON.stringify(payload),
+  );
+  const res = await fetchImpl(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,size",
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": contentType },
+      body,
+    },
+  );
+  if (!res.ok) throw new Error(`Drive snapshot upload failed: HTTP ${res.status}`);
+  const created = (await res.json()) as DriveFileMeta;
+
+  // Prune older snapshots past MAX_CLOUD_SNAPSHOTS without blocking caller on cleanup failures
+  void listDriveBackupSnapshots(clientId, fetchImpl)
+    .then(async (list) => {
+      const extra = list.slice(MAX_CLOUD_SNAPSHOTS);
+      for (const old of extra) {
+        await fetchImpl(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(old.id)}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => undefined);
+      }
+    })
+    .catch(() => undefined);
+
+  return {
+    id: created.id,
+    name: created.name ?? name,
+    modifiedTime: created.modifiedTime ?? new Date().toISOString(),
+    sizeBytes: created.size ? Number(created.size) : undefined,
+  };
+}
+
+export async function restoreDriveBackupSnapshot(
+  clientId: string,
+  fileId: string,
+  passphrase = getDriveEncryptionPassphrase(),
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ data: Data; updatedAt: number }> {
+  const token = await requestGoogleDriveToken(clientId);
+  const res = await fetchImpl(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401 || res.status === 403) {
+    clearCachedGoogleToken();
+    throw new Error(`${res.status} unauthorized`);
+  }
+  if (!res.ok) throw new Error(`Drive snapshot download failed: HTTP ${res.status}`);
+  const parsed = (await res.json()) as Partial<EncryptedSyncWireRecord & DriveSyncRecord>;
+  let data: unknown = parsed.data;
+  if (parsed.encryptedPayload && isEncryptedBackupEnvelope(parsed.encryptedPayload)) {
+    const pass = passphrase.trim();
+    if (!pass) throw new Error("encrypted: missing_passphrase");
+    const plain = await decryptBackupPayload(parsed.encryptedPayload, pass);
+    data = JSON.parse(plain);
+  }
+  const validation = validateBackupJsonObject(data);
+  if (!validation.ok) throw new Error(validation.error);
+  return {
+    data: data as Data,
+    updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : Date.now(),
+  };
 }

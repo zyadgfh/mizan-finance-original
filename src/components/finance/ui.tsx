@@ -4,7 +4,8 @@ import gsap from "gsap";
 import { ChevronLeft } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
-import { money } from "@/lib/finance/logic";
+import { currencySymbol, money } from "@/lib/finance/logic";
+import { maskPersonName, useSecuritySettings } from "@/lib/finance/security";
 import type { Currency } from "@/lib/finance/types";
 import { prefersReducedMotion } from "./motion-utils";
 
@@ -15,21 +16,36 @@ export function Amount({
   currency,
   sign = "none",
   className,
+  unmasked = false,
 }: {
   value: number;
   currency: Currency;
   sign?: "auto" | "plus" | "minus" | "none";
   className?: string;
+  unmasked?: boolean;
 }) {
+  const { hideAmounts } = useSecuritySettings();
   const neg = sign === "minus" || (sign === "auto" && value < 0);
   const pos = sign === "plus" || (sign === "auto" && value > 0);
   const tone = neg ? "text-expense" : pos ? "text-income" : "text-label";
+  if (hideAmounts && !unmasked) {
+    return (
+      <span dir="ltr" className={cn("num whitespace-nowrap", tone, className)} aria-label="مبلغ مخفي">
+        •••• {currencySymbol(currency)}
+      </span>
+    );
+  }
   return (
     <span dir="ltr" className={cn("num whitespace-nowrap", tone, className)}>
       {neg ? "−" : pos ? "+" : ""}
       {money(value, currency)}
     </span>
   );
+}
+
+export function PersonName({ name, className }: { name: string; className?: string }) {
+  const { hidePeopleNames } = useSecuritySettings();
+  return <span className={className}>{maskPersonName(name, hidePeopleNames)}</span>;
 }
 
 export function Section({
@@ -81,8 +97,8 @@ export function Row({
   onClick,
   destructive,
 }: {
-  title: string;
-  sub?: string;
+  title: ReactNode;
+  sub?: ReactNode;
   leading?: ReactNode;
   trailing?: ReactNode;
   chevron?: boolean;

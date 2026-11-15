@@ -1,6 +1,8 @@
 import { createContext, useContext } from "react";
+import type { TxKind } from "@/lib/finance/types";
 
 export type Tab = "home" | "ledger" | "debts" | "people" | "more";
+export type DebtTabFilter = "open" | "overdue" | "receivable" | "payable" | "closed";
 
 export type Route =
   | { name: "main" }
@@ -12,11 +14,21 @@ export type Route =
   | { name: "wallets" }
   | { name: "recurring" }
   | { name: "notifications" }
-  | { name: "drive" };
+  | { name: "drive" }
+  | { name: "security" };
+
+export type TxPrefill = {
+  kind?: TxKind;
+  amount?: number;
+  categoryId?: string;
+  walletId?: string;
+  note?: string;
+  personId?: string;
+};
 
 export type SheetState =
   | null
-  | { kind: "txn"; id?: string }
+  | { kind: "txn"; id?: string; prefill?: TxPrefill }
   | { kind: "debt"; id?: string }
   | { kind: "pay"; debtId: string }
   | { kind: "person"; id?: string }
@@ -27,7 +39,8 @@ export type SheetState =
   | { kind: "goal"; id?: string }
   | { kind: "goal-move"; goalId: string; withdraw?: boolean }
   | { kind: "pin" }
-  | { kind: "wallet"; id?: string };
+  | { kind: "wallet"; id?: string }
+  | { kind: "search" };
 
 export type MizanUI = {
   tab: Tab;
@@ -44,6 +57,13 @@ export type MizanUI = {
   openRecurring: () => void;
   openNotifications: () => void;
   openDrive: () => void;
+  openSecurity: () => void;
+  openDebtsFiltered: (filter: DebtTabFilter) => void;
+  openLedgerFiltered: (categoryId?: string) => void;
+  debtFilter: DebtTabFilter;
+  setDebtFilter: (f: DebtTabFilter) => void;
+  ledgerCategoryFilter: string;
+  setLedgerCategoryFilter: (catId: string) => void;
   back: () => void;
   sheet: SheetState;
   openSheet: (sheet: Exclude<SheetState, null>) => void;

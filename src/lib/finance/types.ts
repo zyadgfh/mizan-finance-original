@@ -21,6 +21,9 @@ export type IconName =
 
 export type TxKind = "income" | "expense";
 export type DebtDirection = "receivable" | "payable";
+export type DebtCadence = "monthly" | "biweekly" | "weekly";
+export type DebtStatus = "active" | "overdue" | "completed";
+export type GoalCategory = "general" | "travel" | "debt_payoff" | "device" | "emergency";
 export type TxSource = "manual" | "recurring" | "debt" | "split";
 export type WalletKind = "cash" | "instapay" | "vodafone" | "bank" | "other";
 
@@ -64,10 +67,26 @@ export type Debt = {
   title: string;
   principal: number;
   dueDate: string;
-  /** 1 = lump sum. Above 1, equal monthly parts starting at dueDate. */
+  /** 1 = lump sum. Above 1, equal parts starting at dueDate. */
   installments?: number;
+  /** Recurring cadence between installments (default: monthly). */
+  cadence?: DebtCadence;
   note: string;
   createdAt: number;
+};
+
+export type DebtAuditAction = "created" | "debt-edited" | "payment-added" | "payment-edited" | "payment-deleted";
+
+export type DebtAuditEntry = {
+  id: string;
+  debtId: string;
+  action: DebtAuditAction;
+  at: number;
+  summary: string;
+  beforeAmount?: number;
+  afterAmount?: number;
+  beforeDate?: string;
+  afterDate?: string;
 };
 
 export type Payment = {
@@ -122,6 +141,8 @@ export type Goal = {
   name: string;
   target: number;
   deadline: string;
+  category?: GoalCategory;
+  linkedDebtId?: string;
   createdAt: number;
 };
 
@@ -152,4 +173,5 @@ export type Data = {
   recurring: Recurring[];
   goals: Goal[];
   goalMoves: GoalMove[];
+  debtLogs?: DebtAuditEntry[];
 };

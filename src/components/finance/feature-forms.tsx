@@ -3,10 +3,10 @@ import { toast } from "sonner";
 import { useMizan } from "@/components/finance/context";
 import { PillButton, Section, Segment, Sheet } from "@/components/finance/ui";
 import { cn } from "@/lib/cn";
-import { goalSaved, round2, todayISO, walletBalance } from "@/lib/finance/logic";
+import { GOAL_CATEGORY_LABEL, goalSaved, remaining, round2, todayISO, walletBalance } from "@/lib/finance/logic";
 import { hashPin } from "@/lib/finance/pin";
 import { useFinance } from "@/lib/finance/store";
-import type { TxKind, WalletKind } from "@/lib/finance/types";
+import type { GoalCategory, TxKind, WalletKind } from "@/lib/finance/types";
 
 function parseAmount(raw: string) {
   const n = Number(raw.replace(",", ".").trim());
@@ -438,9 +438,13 @@ export function SplitForm() {
   );
 }
 
+const GOAL_CATEGORIES: GoalCategory[] = ["travel", "debt_payoff", "device", "emergency", "general"];
+
 export function GoalForm({ id }: { id?: string }) {
   const { closeSheet, frame, route, back } = useMizan();
   const goals = useFinance((s) => s.goals);
+  const debts = useFinance((s) => s.debts);
+  const payments = useFinance((s) => s.payments);
   const existing = goals.find((g) => g.id === id);
   const addGoal = useFinance((s) => s.addGoal);
   const updateGoal = useFinance((s) => s.updateGoal);
@@ -448,6 +452,16 @@ export function GoalForm({ id }: { id?: string }) {
   const [name, setName] = useState(existing?.name ?? "");
   const [target, setTarget] = useState(existing ? String(existing.target) : "");
   const [deadline, setDeadline] = useState(existing?.deadline ?? "");
+  const [category, setCategory] = useState<GoalCategory>(existing?.category ?? "general");
+  const [linkedDebtId, setLinkedDebtId] = useState(existing?.linkedDebtId ?? "");
+  const openPayables = debts.filter((d) => d.direction === "payable" && remaining(d, payments) > 0);
+
+  function pickCategory(cat: GoalCategory) {
+    setCategory(cat);
+    if (!existing && !name.trim() && cat !== "general") {
+      setName(GOAL_CATEGORY_LABEL[cat]);
+    }
+  }
 
   function save() {
     const n = parseAmount(target);
@@ -455,7 +469,13 @@ export function GoalForm({ id }: { id?: string }) {
       toast("اكتب الاسم والمبلغ المستهدف");
       return;
     }
-    const input = { name, target: n, deadline };
+    const input = {
+      name,
+      target: n,
+      deadline,
+      category,
+      linkedDebtId: category === "debt_payoff" ? linkedDebtId || undefined : undefined,
+    };
     if (existing) updateGoal(existing.id, input);
     else addGoal(input);
     toast(existing ? "تم تعديل الهدف" : "أُضيف الهدف");
@@ -463,19 +483,64 @@ export function GoalForm({ id }: { id?: string }) {
   }
 
   return (
-    <Sheet title={existing ? "تعديل هدف" : "هدف ادخار"} description="مبلغ وموعد" container={frame} onClose={closeSheet} trailing={<PillButton onClick={save}>حفظ</PillButton>}>
+    <Sheet title={existing ? "تعديل هدف" : "هدف ادخار"} description="مبلغ وموعد ونوع" container={frame} onClose={closeSheet} trailing={<PillButton onClick={save}>حفظ</PillButton>}>
       <AmountField value={target} onChange={setTarget} label="المستهدف" />
+      <div className="mt-2 flex flex-wrap justify-center gap-1.5 px-4">
+        {GOAL_CATEGORIES.map((c) => (
+          <button
+            key={c}
+            type="button"
+            onClick={() => pickCategory(c)}
+            className={cn(
+              "min-h-9 rounded-pill px-3 text-caption font-semibold",
+              category === c ? "bg-tint text-on-tint" : "bg-fill text-label-2",
+            )}
+          >
+            {GOAL_CATEGORY_LABEL[c]}
+          </button>
+        ))}
+      </div>
       <Section>
         <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">الاسم</span>
-            <input className="field" value={name} placeholder="سفر، جهاز…" onChange={(e) => setName(e.target.value)} />
+            <input className="field" value={name} placeholder="سفر، جهاز، صندوق طوارئ…" onChange={(e) => setName(e.target.value)} />
           </label>
           <div className="row-sep" />
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">الموعد</span>
             <input type="date" dir="ltr" className="field" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
           </label>
+          {category === "debt_payoff" && openPayables.length ? (
+            <>
+              <div className="row-sep" />
+              <label className="flex min-h-11 items-center gap-3 px-4">
+                <span className="w-16 shrink-0 text-body">الدين</span>
+                <select
+                  className="field"
+                  value={linkedDebtId}
+                  onChange={(e) => {
+                    const idVal = e.target.value;
+                    setLinkedDebtId(idVal);
+                    const picked = openPayables.find((d) => d.id === idVal);
+                    if (picked && !target) {
+                      setTarget(String(remaining(picked, payments)));
+                      if (!name.trim() || name === GOAL_CATEGORY_LABEL.debt_payoff) {
+                        setName(`سداد: ${picked.title}`);
+                      }
+                    }
+                  }}
+                >
+                  <option value="">اختياري — ربط بدين</option>
+                  {openPayables.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.title} ({remaining(d, payments)})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : null}
         </div>
       </Section>
       {existing ? (

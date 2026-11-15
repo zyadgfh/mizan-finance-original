@@ -1,13 +1,15 @@
 import { toast } from "sonner";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { IconTile } from "@/components/finance/icons";
 import { PillButton, Section, Segment, Sheet } from "@/components/finance/ui";
-import { useMizan } from "@/components/finance/context";
+import { useMizan, type TxPrefill } from "@/components/finance/context";
 import { cn } from "@/lib/cn";
-import { paidOf, planInstallments, round2, todayISO } from "@/lib/finance/logic";
+import { frequentTemplates, loadEntryPrefs, rememberEntryChoice } from "@/lib/finance/entry-prefs";
+import { paidOf, planInstallments, round2, suggestCategoryFromNote, todayISO } from "@/lib/finance/logic";
 import { compressReceipt, deleteReceipt, loadReceipt, saveReceipt } from "@/lib/finance/receipts";
 import { useFinance } from "@/lib/finance/store";
-import type { DebtDirection, TxKind } from "@/lib/finance/types";
+import type { DebtCadence, DebtDirection, TxKind } from "@/lib/finance/types";
+import { clearCachedGoogleToken } from "@/lib/sync/google-drive-gis";
 
 function parseAmount(raw: string) {
   const n = Number(raw.replace(",", ".").trim());
@@ -35,7 +37,7 @@ function AmountField({ value, onChange }: { value: string; onChange: (v: string)
   );
 }
 
-export function TxnForm({ id }: { id?: string }) {
+export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
   const { closeSheet, frame } = useMizan();
   const txns = useFinance((s) => s.txns);
   const payments = useFinance((s) => s.payments);
@@ -43,6 +45,7 @@ export function TxnForm({ id }: { id?: string }) {
   const categories = useFinance((s) => s.categories);
   const people = useFinance((s) => s.people);
   const wallets = useFinance((s) => s.wallets);
+  const recurring = useFinance((s) => s.recurring);
   const addTxn = useFinance((s) => s.addTxn);
   const updateTxn = useFinance((s) => s.updateTxn);
   const removeTxn = useFinance((s) => s.removeTxn);
@@ -51,21 +54,53 @@ export function TxnForm({ id }: { id?: string }) {
   const existing = txns.find((t) => t.id === id);
   const linkedPayment = existing ? payments.find((p) => p.txId === existing.id) : undefined;
   const linkedDebt = linkedPayment ? debts.find((d) => d.id === linkedPayment.debtId) : undefined;
+  const prefs = useMemo(() => loadEntryPrefs(), []);
+  const initialKind: TxKind = existing?.kind ?? prefill?.kind ?? "expense";
+  const initialCategory =
+    existing?.categoryId ??
+    prefill?.categoryId ??
+    (prefs.lastCategoryByKind?.[initialKind] &&
+    categories.some((c) => c.id === prefs.lastCategoryByKind?.[initialKind] && c.kind === initialKind)
+      ? prefs.lastCategoryByKind[initialKind]!
+      : categories.find((c) => c.kind === initialKind)?.id ?? "");
+  const initialWallet =
+    existing?.walletId ??
+    prefill?.walletId ??
+    (prefs.lastWalletId && wallets.some((w) => w.id === prefs.lastWalletId)
+      ? prefs.lastWalletId
+      : wallets[0]?.id ?? "w-cash");
+
   const [draftId] = useState(() => existing?.id ?? crypto.randomUUID());
-  const [kind, setKind] = useState<TxKind>(existing?.kind ?? "expense");
-  const [amount, setAmount] = useState(existing ? String(existing.amount) : "");
-  const [categoryId, setCategoryId] = useState(
-    existing?.categoryId ?? categories.find((c) => c.kind === (existing?.kind ?? "expense"))?.id ?? "",
+  const [kind, setKind] = useState<TxKind>(initialKind);
+  const [amount, setAmount] = useState(
+    existing ? String(existing.amount) : prefill?.amount ? String(prefill.amount) : "",
   );
+  const [categoryId, setCategoryId] = useState(initialCategory);
+  const [manualCategoryPicked, setManualCategoryPicked] = useState(Boolean(existing || prefill?.categoryId));
   const [date, setDate] = useState(existing?.date ?? todayISO());
-  const [note, setNote] = useState(existing?.note ?? "");
-  const [personId, setPersonId] = useState(existing?.personId ?? "");
-  const [walletId, setWalletId] = useState(existing?.walletId ?? wallets[0]?.id ?? "w-cash");
+  const [note, setNote] = useState(existing?.note ?? prefill?.note ?? "");
+  const [personId, setPersonId] = useState(existing?.personId ?? prefill?.personId ?? "");
+  const [walletId, setWalletId] = useState(initialWallet);
   const [receiptOn, setReceiptOn] = useState(Boolean(existing?.receiptId));
   const [preview, setPreview] = useState("");
 
   const cats = categories.filter((c) => c.kind === kind);
   const receiptKey = existing?.id ?? draftId;
+  const templates = useMemo(
+    () => (existing ? [] : frequentTemplates(txns, recurring, categories, 5)),
+    [existing, txns, recurring, categories],
+  );
+  const suggestedCatId = useMemo(
+    () => (existing ? null : suggestCategoryFromNote(note, kind, categories, txns)),
+    [existing, note, kind, categories, txns],
+  );
+  const suggestedCat = suggestedCatId ? cats.find((c) => c.id === suggestedCatId) : undefined;
+
+  useEffect(() => {
+    if (!existing && !manualCategoryPicked && suggestedCatId && cats.some((c) => c.id === suggestedCatId)) {
+      setCategoryId(suggestedCatId);
+    }
+  }, [existing, manualCategoryPicked, suggestedCatId, cats]);
 
   useEffect(() => {
     if (!receiptOn) {
@@ -120,10 +155,21 @@ export function TxnForm({ id }: { id?: string }) {
       }
     } else {
       addTxn({ ...input, id: draftId });
+      rememberEntryChoice(kind, cat.id, walletId);
     }
     if (!receiptOn) void deleteReceipt(receiptKey);
     toast(existing ? "تم تعديل الحركة" : kind === "income" ? "تم تسجيل الإيراد" : "تم تسجيل المصروف");
     closeSheet();
+  }
+
+  function applyTemplate(tpl: (typeof templates)[number]) {
+    setKind(tpl.kind);
+    setAmount(String(tpl.amount));
+    setCategoryId(tpl.categoryId);
+    setManualCategoryPicked(true);
+    setWalletId(tpl.walletId);
+    setNote(tpl.note);
+    toast(`طُبّق قالب «${tpl.title}»`);
   }
 
   function destroy() {
@@ -159,6 +205,20 @@ export function TxnForm({ id }: { id?: string }) {
       }
     >
       <AmountField value={amount} onChange={setAmount} />
+      {templates.length ? (
+        <div className="mt-2 flex gap-1.5 overflow-x-auto px-4 pb-1">
+          {templates.map((tpl) => (
+            <button
+              key={tpl.id}
+              type="button"
+              onClick={() => applyTemplate(tpl)}
+              className="shrink-0 rounded-pill bg-fill px-3 py-1.5 text-caption font-semibold text-label active:opacity-75"
+            >
+              {tpl.title} · {tpl.amount}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {linkedPayment ? (
         <p className="px-6 pt-2 text-center text-foot text-label-2">
           هذه الحركة مرتبطة بسداد دين{linkedDebt ? ` (${linkedDebt.title})` : ""} — التعديل يحدّث الدفعة والمحفظة معاً.
@@ -169,8 +229,13 @@ export function TxnForm({ id }: { id?: string }) {
             value={kind}
             onChange={(k) => {
               setKind(k);
-              const next = categories.find((c) => c.kind === k);
-              setCategoryId(next?.id ?? "");
+              const remembered = prefs.lastCategoryByKind?.[k];
+              const next =
+                remembered && categories.some((c) => c.id === remembered && c.kind === k)
+                  ? remembered
+                  : categories.find((c) => c.kind === k)?.id ?? "";
+              setCategoryId(next);
+              setManualCategoryPicked(false);
             }}
             options={[
               { id: "expense", label: "مصروف" },
@@ -179,6 +244,20 @@ export function TxnForm({ id }: { id?: string }) {
           />
         </div>
       )}
+      {suggestedCat && suggestedCat.id !== categoryId ? (
+        <div className="mt-2 flex justify-center px-4">
+          <button
+            type="button"
+            onClick={() => {
+              setCategoryId(suggestedCat.id);
+              setManualCategoryPicked(true);
+            }}
+            className="rounded-pill bg-tint/15 px-3 py-1 text-caption font-semibold text-tint"
+          >
+            اقتراح التصنيف: {suggestedCat.name} ✓
+          </button>
+        </div>
+      ) : null}
       <div className="grid grid-cols-4 gap-1 px-3 pt-4">
         {cats.map((c) => {
           const on = c.id === categoryId;
@@ -186,7 +265,10 @@ export function TxnForm({ id }: { id?: string }) {
             <button
               key={c.id}
               type="button"
-              onClick={() => setCategoryId(c.id)}
+              onClick={() => {
+                setCategoryId(c.id);
+                setManualCategoryPicked(true);
+              }}
               className="flex min-h-16 flex-col items-center justify-center gap-1 rounded-cell active:opacity-80"
             >
               <IconTile name={c.icon} tone={c.tone} />
@@ -200,18 +282,18 @@ export function TxnForm({ id }: { id?: string }) {
       <Section title="التفاصيل" className="mt-4">
         <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
-            <span className="w-16 shrink-0 text-body">التاريخ</span>
-            <input type="date" className="field" dir="ltr" value={date} onChange={(e) => setDate(e.target.value)} />
-          </label>
-          <div className="row-sep" />
-          <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">ملاحظة</span>
             <input
               className="field"
               value={note}
-              placeholder="اختياري"
+              placeholder="مثال: غداء، أوبر، كهرباء… (يقترح التصنيف)"
               onChange={(e) => setNote(e.target.value)}
             />
+          </label>
+          <div className="row-sep" />
+          <label className="flex min-h-11 items-center gap-3 px-4">
+            <span className="w-16 shrink-0 text-body">التاريخ</span>
+            <input type="date" className="field" dir="ltr" value={date} onChange={(e) => setDate(e.target.value)} />
           </label>
           {!linkedPayment ? (
             <>
@@ -375,6 +457,7 @@ export function DebtForm({ id }: { id?: string }) {
   const [title, setTitle] = useState(existing?.title ?? "");
   const [due, setDue] = useState(existing?.dueDate ?? "");
   const [count, setCount] = useState(String(existing?.installments || 1));
+  const [cadence, setCadence] = useState<DebtCadence>(existing?.cadence ?? "monthly");
   const [note, setNote] = useState(existing?.note ?? "");
   const [personId, setPersonId] = useState(existing?.personId ?? (people[0]?.id ?? "__new"));
   const [newName, setNewName] = useState("");
@@ -408,10 +491,10 @@ export function DebtForm({ id }: { id?: string }) {
         toast("الأصل أقل من المبلغ المسدّد");
         return;
       }
-      updateDebt(existing.id, { personId: pid, direction, title: title || "دين", principal: n, dueDate: due, note, installments });
+      updateDebt(existing.id, { personId: pid, direction, title: title || "دين", principal: n, dueDate: due, note, installments, cadence });
       toast("تم تعديل الدين");
     } else {
-      addDebt({ personId: pid, direction, title: title || "دين", principal: n, dueDate: due, note, installments });
+      addDebt({ personId: pid, direction, title: title || "دين", principal: n, dueDate: due, note, installments, cadence });
       toast("تم تسجيل الدين");
     }
     closeSheet();
@@ -479,6 +562,19 @@ export function DebtForm({ id }: { id?: string }) {
               onChange={(e) => setCount(e.target.value.replace(/\D/g, "").slice(0, 2))}
             />
           </label>
+          {Number(count) > 1 ? (
+            <>
+              <div className="row-sep" />
+              <label className="flex min-h-11 items-center gap-3 px-4">
+                <span className="w-16 shrink-0 text-body">التكرار</span>
+                <select className="field" value={cadence} onChange={(e) => setCadence(e.target.value as DebtCadence)}>
+                  <option value="monthly">شهري</option>
+                  <option value="biweekly">كل أسبوعين</option>
+                  <option value="weekly">أسبوعي</option>
+                </select>
+              </label>
+            </>
+          ) : null}
           <div className="row-sep" />
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">ملاحظة</span>
@@ -489,7 +585,7 @@ export function DebtForm({ id }: { id?: string }) {
       <p className="px-8 pt-3 text-foot text-label-2">
         {direction === "receivable" ? "لي: المبلغ الذي ينتظر رجوعه إليك." : "عليّ: المبلغ الذي ستسدده أنت."}
         {Number(count) > 1 && Number.isFinite(parseAmount(amount))
-          ? ` ${Number(count)} أقساط، كل قسط تقريباً ${planInstallments({ id: "", personId: "", direction, title: "", principal: parseAmount(amount), dueDate: due || todayISO(), note: "", installments: Number(count), createdAt: 0 })[0]?.amount ?? ""}.`
+          ? ` ${Number(count)} أقساط (${cadence === "weekly" ? "أسبوعياً" : cadence === "biweekly" ? "كل أسبوعين" : "شهرياً"})، كل قسط تقريباً ${planInstallments({ id: "", personId: "", direction, title: "", principal: parseAmount(amount), dueDate: due || todayISO(), note: "", installments: Number(count), cadence, createdAt: 0 })[0]?.amount ?? ""}.`
           : " قسط واحد يعني استحقاقاً واحداً."}
       </p>
     </Sheet>
@@ -619,11 +715,14 @@ export function ResetForm() {
           <PillButton
             tone="danger"
             onClick={() => {
+              if (clearSecurityAndTasks) {
+                clearCachedGoogleToken();
+                setPinHash(null);
+              }
               resetAll({ clearSecurityAndTasks });
-              if (clearSecurityAndTasks) setPinHash(null);
               back();
               closeSheet();
-              toast("تم مسح الدفتر");
+              toast(clearSecurityAndTasks ? "تم المسح الآمن الكامل للبيانات المحلية" : "تم مسح الدفتر");
             }}
           >
             مسح الكل

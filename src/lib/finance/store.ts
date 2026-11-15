@@ -1,8 +1,15 @@
 import { create } from "zustand";
 import { clearScheduledTasks } from "../notifications/tasks.ts";
+import {
+  decryptBackupPayload,
+  encryptBackupPayload,
+  isEncryptedBackupEnvelope,
+  validateBackupJsonObject,
+} from "../sync/crypto-backup.ts";
 import { currentMonth, defaultWallets, isCurrency, round2, todayISO } from "./logic.ts";
 import { writePinHash } from "./pin.ts";
 import { clearReceipts, exportAllReceipts, importAllReceipts } from "./receipts.ts";
+import { overwriteAndClearLocalKeys } from "./security.ts";
 import { seedData } from "./seed.ts";
 import type {
   Budget,
@@ -10,8 +17,11 @@ import type {
   Currency,
   Data,
   Debt,
+  DebtAuditEntry,
+  DebtCadence,
   DebtDirection,
   Goal,
+  GoalCategory,
   GoalMove,
   Payment,
   Person,
@@ -25,6 +35,7 @@ import type {
 
 const KEY = "mizan.v1";
 const UPDATED_AT_KEY = "mizan.updatedAt";
+const PENDING_SYNC_KEY = "mizan.drive.pending";
 
 export type TxInput = {
   id?: string;
@@ -48,6 +59,7 @@ export type DebtInput = {
   dueDate: string;
   note: string;
   installments: number;
+  cadence?: DebtCadence;
 };
 
 export type PersonInput = { name: string; phone: string; note: string };
@@ -112,8 +124,8 @@ type Actions = {
   removeRecurring: (id: string) => void;
   confirmRecurring: (id: string) => string | null;
   skipRecurring: (id: string) => void;
-  addGoal: (input: { name: string; target: number; deadline: string }) => string;
-  updateGoal: (id: string, input: { name: string; target: number; deadline: string }) => void;
+  addGoal: (input: { name: string; target: number; deadline: string; category?: GoalCategory; linkedDebtId?: string }) => string;
+  updateGoal: (id: string, input: { name: string; target: number; deadline: string; category?: GoalCategory; linkedDebtId?: string }) => void;
   removeGoal: (id: string) => void;
   addGoalMove: (input: { goalId: string; walletId: string; amount: number; date: string; note: string }) => string;
   removeGoalMove: (id: string) => GoalMove | undefined;
@@ -150,7 +162,13 @@ export function pickFinanceData(s: Data): Data {
     recurring: s.recurring,
     goals: s.goals,
     goalMoves: s.goalMoves,
+    debtLogs: s.debtLogs ?? [],
   };
+}
+
+function appendAudit(logs: DebtAuditEntry[] | undefined, entry: Omit<DebtAuditEntry, "id" | "at">): DebtAuditEntry[] {
+  const next: DebtAuditEntry = { ...entry, id: uid(), at: Date.now() };
+  return [next, ...(logs ?? [])].slice(0, 300);
 }
 
 function cashOpeningOf(wallets: Wallet[], fallback: number) {
@@ -168,6 +186,17 @@ export function getLocalUpdatedAt(): number {
 export function setLocalUpdatedAt(ts: number): void {
   if (typeof localStorage === "undefined") return;
   localStorage.setItem(UPDATED_AT_KEY, String(Math.max(0, Math.round(ts))));
+}
+
+export function getPendingCloudSync(): boolean {
+  if (typeof localStorage === "undefined") return false;
+  return localStorage.getItem(PENDING_SYNC_KEY) === "1";
+}
+
+export function setPendingCloudSync(pending: boolean): void {
+  if (typeof localStorage === "undefined") return;
+  if (pending) localStorage.setItem(PENDING_SYNC_KEY, "1");
+  else localStorage.removeItem(PENDING_SYNC_KEY);
 }
 
 export const useFinance = create<Data & Actions>((set, get) => ({
@@ -210,6 +239,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
         }
       }
       const nextKind = debt ? (debt.direction === "receivable" ? "income" : "expense") : existing.kind;
+      const amountChanged = linkedPayment.amount !== amount || linkedPayment.date !== input.date;
       set({
         txns: get().txns.map((t) =>
           t.id === id
@@ -237,6 +267,18 @@ export const useFinance = create<Data & Actions>((set, get) => ({
               }
             : p,
         ),
+        debtLogs:
+          debt && amountChanged
+            ? appendAudit(get().debtLogs, {
+                debtId: debt.id,
+                action: "payment-edited",
+                summary: `تعديل دفعة سابقة من ${linkedPayment.amount} إلى ${amount}`,
+                beforeAmount: linkedPayment.amount,
+                afterAmount: amount,
+                beforeDate: linkedPayment.date,
+                afterDate: input.date,
+              })
+            : get().debtLogs,
       });
       return true;
     }
@@ -315,21 +357,44 @@ export const useFinance = create<Data & Actions>((set, get) => ({
   },
   addDebt: (input) => {
     const id = uid();
+    const principal = round2(input.principal);
+    const title = input.title.trim() || "دين";
     const debt: Debt = {
       id,
       personId: input.personId,
       direction: input.direction,
-      title: input.title.trim() || "دين",
+      title,
       note: input.note.trim(),
-      principal: round2(input.principal),
+      principal,
       dueDate: input.dueDate,
       installments: clampInstallments(input.installments),
+      cadence: input.cadence ?? "monthly",
       createdAt: Date.now(),
     };
-    set({ debts: [debt, ...get().debts] });
+    set({
+      debts: [debt, ...get().debts],
+      debtLogs: appendAudit(get().debtLogs, {
+        debtId: id,
+        action: "created",
+        summary: `تسجيل دين «${title}» بمبلغ ${principal}`,
+        afterAmount: principal,
+        afterDate: input.dueDate || undefined,
+      }),
+    });
     return id;
   },
   updateDebt: (id, input) => {
+    const prev = get().debts.find((d) => d.id === id);
+    const nextPrincipal = round2(input.principal);
+    const nextInstallments = clampInstallments(input.installments);
+    const nextCadence = input.cadence ?? prev?.cadence ?? "monthly";
+    const changes: string[] = [];
+    if (prev) {
+      if (prev.principal !== nextPrincipal) changes.push(`المبلغ: ${prev.principal} → ${nextPrincipal}`);
+      if ((prev.dueDate || "") !== (input.dueDate || "")) changes.push(`الاستحقاق: ${prev.dueDate || "—"} → ${input.dueDate || "—"}`);
+      if ((prev.installments || 1) !== nextInstallments) changes.push(`الأقساط: ${prev.installments || 1} → ${nextInstallments}`);
+      if ((prev.cadence ?? "monthly") !== nextCadence) changes.push("تغيير التكرار");
+    }
     set({
       debts: get().debts.map((d) =>
         d.id === id
@@ -339,12 +404,25 @@ export const useFinance = create<Data & Actions>((set, get) => ({
               direction: input.direction,
               title: input.title.trim() || "دين",
               note: input.note.trim(),
-              principal: round2(input.principal),
+              principal: nextPrincipal,
               dueDate: input.dueDate,
-              installments: clampInstallments(input.installments),
+              installments: nextInstallments,
+              cadence: nextCadence,
             }
           : d,
       ),
+      debtLogs:
+        prev && changes.length
+          ? appendAudit(get().debtLogs, {
+              debtId: id,
+              action: "debt-edited",
+              summary: `تعديل الدين (${changes.join(" · ")})`,
+              beforeAmount: prev.principal,
+              afterAmount: nextPrincipal,
+              beforeDate: prev.dueDate || undefined,
+              afterDate: input.dueDate || undefined,
+            })
+          : get().debtLogs,
     });
   },
   removeDebt: (id) => {
@@ -357,6 +435,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       debts: get().debts.filter((d) => d.id !== id),
       payments: get().payments.filter((p) => p.debtId !== id),
       txns: get().txns.filter((t) => !txIds.has(t.id)),
+      debtLogs: (get().debtLogs ?? []).filter((l) => l.debtId !== id),
     });
     return { debt, payments, txns };
   },
@@ -370,6 +449,10 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     const debt = get().debts.find((d) => d.id === input.debtId);
     if (!debt) return "";
     const id = uid();
+    const amount = round2(input.amount);
+    const priorPaid = get().payments.reduce((s, p) => (p.debtId === debt.id ? s + p.amount : s), 0);
+    const beforeRem = round2(Math.max(0, debt.principal - priorPaid));
+    const afterRem = round2(Math.max(0, beforeRem - amount));
     let txId: string | undefined;
     if (input.linkCash) {
       txId = uid();
@@ -378,7 +461,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       const tx: Tx = {
         id: txId,
         kind: income ? "income" : "expense",
-        amount: round2(input.amount),
+        amount,
         categoryId,
         note: input.note.trim() || `${income ? "تحصيل" : "سداد"} · ${debt.title}`,
         date: input.date,
@@ -393,23 +476,44 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     const payment: Payment = {
       id,
       debtId: input.debtId,
-      amount: round2(input.amount),
+      amount,
       date: input.date,
       note: input.note.trim(),
       walletId: input.linkCash ? input.walletId || "w-cash" : undefined,
       txId,
       createdAt: Date.now(),
     };
-    set({ payments: [payment, ...get().payments] });
+    set({
+      payments: [payment, ...get().payments],
+      debtLogs: appendAudit(get().debtLogs, {
+        debtId: debt.id,
+        action: "payment-added",
+        summary: `${debt.direction === "receivable" ? "تحصيل" : "سداد"} دفعة ${amount}`,
+        beforeAmount: beforeRem,
+        afterAmount: afterRem,
+        afterDate: input.date,
+      }),
+    });
     return id;
   },
   removePayment: (id) => {
     const payment = get().payments.find((p) => p.id === id);
     if (!payment) return undefined;
+    const debt = get().debts.find((d) => d.id === payment.debtId);
     const tx = payment.txId ? get().txns.find((t) => t.id === payment.txId) : undefined;
     set({
       payments: get().payments.filter((p) => p.id !== id),
       txns: tx ? get().txns.filter((t) => t.id !== tx.id) : get().txns,
+      debtLogs: debt
+        ? appendAudit(get().debtLogs, {
+            debtId: debt.id,
+            action: "payment-deleted",
+            summary: `حذف دفعة بقيمة ${payment.amount} (${payment.date})`,
+            beforeAmount: payment.amount,
+            afterAmount: 0,
+            beforeDate: payment.date,
+          })
+        : get().debtLogs,
     });
     return { payment, tx };
   },
@@ -569,6 +673,8 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       name: input.name.trim() || "هدف",
       target: round2(input.target),
       deadline: input.deadline,
+      category: input.category ?? "general",
+      linkedDebtId: input.linkedDebtId || undefined,
       createdAt: Date.now(),
     };
     set({ goals: [goal, ...get().goals] });
@@ -577,7 +683,16 @@ export const useFinance = create<Data & Actions>((set, get) => ({
   updateGoal: (id, input) => {
     set({
       goals: get().goals.map((g) =>
-        g.id === id ? { ...g, name: input.name.trim() || g.name, target: round2(input.target), deadline: input.deadline } : g,
+        g.id === id
+          ? {
+              ...g,
+              name: input.name.trim() || g.name,
+              target: round2(input.target),
+              deadline: input.deadline,
+              category: input.category ?? g.category ?? "general",
+              linkedDebtId: input.linkedDebtId !== undefined ? input.linkedDebtId || undefined : g.linkedDebtId,
+            }
+          : g,
       ),
     });
   },
@@ -697,12 +812,14 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       recurring: [],
       goals: [],
       goalMoves: [],
+      debtLogs: [],
     });
     void clearReceipts();
     if (options?.clearSecurityAndTasks && typeof localStorage !== "undefined") {
       try {
         writePinHash(null);
         clearScheduledTasks();
+        overwriteAndClearLocalKeys(localStorage);
       } catch {
         /* ignore storage errors */
       }
@@ -759,7 +876,7 @@ export function asData(raw: unknown): Data | null {
   return {
     txns: d.txns,
     people: d.people,
-    debts: d.debts.map((debt) => ({ ...debt, installments: debt.installments || 1 })),
+    debts: d.debts.map((debt) => ({ ...debt, installments: debt.installments || 1, cadence: debt.cadence ?? "monthly" })),
     payments: d.payments,
     categories,
     budgets: Array.isArray(d.budgets) ? d.budgets : [],
@@ -772,6 +889,7 @@ export function asData(raw: unknown): Data | null {
     recurring: Array.isArray(d.recurring) ? d.recurring : [],
     goals: Array.isArray(d.goals) ? d.goals : [],
     goalMoves: Array.isArray(d.goalMoves) ? d.goalMoves : [],
+    debtLogs: Array.isArray(d.debtLogs) ? d.debtLogs : [],
   };
 }
 
@@ -806,6 +924,7 @@ export function hydrateFinance() {
       return;
     }
     setLocalUpdatedAt(Date.now());
+    setPendingCloudSync(true);
   });
   subscribed = true;
   if (!localStorage.getItem(KEY)) {
@@ -814,14 +933,14 @@ export function hydrateFinance() {
   }
 }
 
-function download(blob: Blob, filename: string) {
+export function downloadExportBlob(blob: Blob, filename: string) {
   const nativeBridge = (
     window as Window & {
       MizanNative?: { shareFile?: (name: string, mimeType: string, content: string) => boolean };
     }
   ).MizanNative;
 
-  if (nativeBridge?.shareFile) {
+  if (nativeBridge?.shareFile && !blob.type.startsWith("image/")) {
     void blob.text().then((content) => {
       const ok = nativeBridge.shareFile?.(filename, blob.type || "application/octet-stream", content);
       if (ok) return;
@@ -855,21 +974,26 @@ function download(blob: Blob, filename: string) {
 }
 
 export function exportData() {
-  download(
+  downloadExportBlob(
     new Blob([JSON.stringify(pickFinanceData(useFinance.getState()), null, 2)], { type: "application/json" }),
     "mizan-backup.json",
   );
 }
 
-export async function exportDataAsync(options: { includeReceipts?: boolean } = {}) {
+export async function exportDataAsync(options: { includeReceipts?: boolean; passphrase?: string } = {}) {
   const base = pickFinanceData(useFinance.getState());
-  if (!options.includeReceipts) {
-    download(new Blob([JSON.stringify(base, null, 2)], { type: "application/json" }), "mizan-backup.json");
+  const receipts = options.includeReceipts ? await exportAllReceipts() : {};
+  const payload = Object.keys(receipts).length ? { ...base, receipts } : base;
+  const jsonText = JSON.stringify(payload, null, 2);
+  if (options.passphrase?.trim()) {
+    const encrypted = await encryptBackupPayload(jsonText, options.passphrase.trim());
+    downloadExportBlob(
+      new Blob([JSON.stringify(encrypted, null, 2)], { type: "application/json" }),
+      "mizan-backup-encrypted.json",
+    );
     return;
   }
-  const receipts = await exportAllReceipts();
-  const payload = Object.keys(receipts).length ? { ...base, receipts } : base;
-  download(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }), "mizan-backup.json");
+  downloadExportBlob(new Blob([jsonText], { type: "application/json" }), "mizan-backup.json");
 }
 
 function csvCell(value: string | number) {
@@ -908,21 +1032,47 @@ export function exportCsv() {
         .join(","),
     );
   }
-  download(new Blob([`\uFEFF${lines.join("\n")}`], { type: "text/csv;charset=utf-8" }), "mizan.csv");
+  downloadExportBlob(new Blob([`\uFEFF${lines.join("\n")}`], { type: "text/csv;charset=utf-8" }), "mizan.csv");
 }
 
 export function importData(text: string) {
-  const raw = JSON.parse(text) as Record<string, unknown>;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("ملف JSON غير صالح");
+  }
+  if (isEncryptedBackupEnvelope(raw)) {
+    throw new Error("النسخة مشفّرة — أدخل كلمة مرور فك التشفير للاستيراد");
+  }
+  const validation = validateBackupJsonObject(raw);
+  if (!validation.ok) {
+    throw new Error(validation.error);
+  }
   const parsed = asData(raw);
-  if (!parsed) throw new Error("bad");
+  if (!parsed) throw new Error("تعذّر قراءة بنية الدفتر");
   useFinance.getState().replaceAll({ ...parsed, demo: false }, Date.now());
-  return raw;
+  return raw as Record<string, unknown>;
 }
 
-export async function importDataAsync(text: string) {
-  const raw = importData(text);
+export async function importDataAsync(text: string, passphrase?: string) {
+  let rawObj: unknown;
+  try {
+    rawObj = JSON.parse(text);
+  } catch {
+    throw new Error("ملف JSON غير صالح");
+  }
+  let plainText = text;
+  if (isEncryptedBackupEnvelope(rawObj)) {
+    if (!passphrase?.trim()) {
+      throw new Error("هذه النسخة مشفّرة — يلزم إدخال كلمة مرور فك التشفير");
+    }
+    plainText = await decryptBackupPayload(rawObj, passphrase.trim());
+  }
+  const raw = importData(plainText);
   const receipts = raw?.receipts;
   if (receipts && typeof receipts === "object" && !Array.isArray(receipts)) {
     await importAllReceipts(receipts as Record<string, string>);
   }
+  return raw;
 }

@@ -1,7 +1,13 @@
-import { ChevronRight, Ellipsis, House, Scale, Users, Wallet } from "lucide-react";
-import { useEffect, useLayoutEffect, useState } from "react";
-import { Toaster } from "sonner";
-import { MizanContext, type Route, type SheetState, type Tab } from "@/components/finance/context";
+import { ChevronRight, Ellipsis, House, Scale, Search, Users, Wallet } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Toaster, toast } from "sonner";
+import {
+  MizanContext,
+  type DebtTabFilter,
+  type Route,
+  type SheetState,
+  type Tab,
+} from "@/components/finance/context";
 import { DriveSyncScreen } from "@/components/finance/drive-sync-screen";
 import {
   GoalForm,
@@ -32,12 +38,38 @@ import {
   PeopleScreen,
   PersonScreen,
 } from "@/components/finance/screens";
+import { UnifiedSearchSheet } from "@/components/finance/search-sheet";
+import { SecurityScreen } from "@/components/finance/security-screen";
 import { PillButton } from "@/components/finance/ui";
 import { cn } from "@/lib/cn";
 import { currentMonth, debtTotals, shiftMonthKey } from "@/lib/finance/logic";
 import { readPinHash, writePinHash } from "@/lib/finance/pin";
-import { getLocalUpdatedAt, hydrateFinance, pickFinanceData, useFinance } from "@/lib/finance/store";
-import { scheduleAllTaskNotifications } from "@/lib/notifications/scheduler";
+import {
+  applyPrivacyScreenFlag,
+  loadSecuritySettings,
+  shouldAutoLock,
+  useSecuritySettings,
+} from "@/lib/finance/security";
+import {
+  getLocalUpdatedAt,
+  getPendingCloudSync,
+  hydrateFinance,
+  pickFinanceData,
+  setPendingCloudSync,
+  useFinance,
+} from "@/lib/finance/store";
+import {
+  cancelTaskNotification,
+  registerNotificationActionListener,
+  scheduleAllTaskNotifications,
+  scheduleTaskNotification,
+} from "@/lib/notifications/scheduler";
+import {
+  ACTION_MARK_PAID,
+  ACTION_SNOOZE_DAY,
+  executeNotificationAction,
+  loadScheduledTasks,
+} from "@/lib/notifications/tasks";
 import {
   getCachedGoogleToken,
   getConfiguredGoogleClientId,
@@ -72,17 +104,27 @@ function App() {
   const [month, setMonth] = useState(currentMonth);
   const [stack, setStack] = useState<Route[]>([{ name: "main" }]);
   const [sheet, setSheet] = useState<SheetState>(null);
+  const [debtFilter, setDebtFilter] = useState<DebtTabFilter>("open");
+  const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState("");
   const [query, setQuery] = useState("");
   const [frame, setFrame] = useState<HTMLElement | null>(null);
   const [compact, setCompact] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
   const [pinHash, setPinHashState] = useState<string | null>(null);
+  const [backgroundMasked, setBackgroundMasked] = useState(false);
+  const lastActiveRef = useRef<number>(Date.now());
+  const security = useSecuritySettings();
 
   const route = stack[stack.length - 1] ?? { name: "main" };
 
   useIsomorphicLayoutEffect(() => {
     setPinHashState(readPinHash());
+    applyPrivacyScreenFlag(loadSecuritySettings().hideBalancesInRecents);
   }, []);
+
+  useEffect(() => {
+    applyPrivacyScreenFlag(security.hideBalancesInRecents);
+  }, [security.hideBalancesInRecents]);
 
   useEffect(() => {
     const win = window as Window & { __mizanBack?: () => boolean };
@@ -113,34 +155,124 @@ function App() {
   useEffect(() => {
     hydrateFinance();
     void scheduleAllTaskNotifications();
+
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const action = params.get("action");
+      if (action === "expense") setSheet({ kind: "txn", prefill: { kind: "expense" } });
+      else if (action === "income") setSheet({ kind: "txn", prefill: { kind: "income" } });
+      else if (action === "debt") setSheet({ kind: "debt" });
+      else if (action === "search") setSheet({ kind: "search" });
+    }
   }, []);
 
+  // Listen to native Android notification action buttons ("تم الدفع" / "تأجيل يوم")
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    void registerNotificationActionListener((action) => {
+      const extra = (action.notification.extra ?? {}) as { taskId?: string };
+      const taskId = extra.taskId;
+      if (!taskId) return;
+      const task = loadScheduledTasks().find((t) => t.id === taskId);
+      if (!task) return;
+      const state = useFinance.getState();
+      const res = executeNotificationAction(action.actionId, task, {
+        getData: () => pickFinanceData(useFinance.getState()),
+        addPayment: state.addPayment,
+        confirmRecurring: state.confirmRecurring,
+        addTxn: state.addTxn,
+      });
+      if (action.actionId === ACTION_SNOOZE_DAY && res.updatedTask) {
+        void scheduleTaskNotification(res.updatedTask);
+      } else if (action.actionId === ACTION_MARK_PAID) {
+        void cancelTaskNotification(task.id);
+      }
+      if (res.message) toast(res.message);
+    }).then((fn) => {
+      cleanup = fn;
+    });
+    return () => {
+      cleanup?.();
+    };
+  }, []);
+
+  // Auto-lock + privacy blur shield when app goes to background or exceeds inactivity timeout
+  useEffect(() => {
+    if (!pinHash) return;
+    if (unlocked) lastActiveRef.current = Date.now();
+
+    const recordActivity = () => {
+      if (unlocked) lastActiveRef.current = Date.now();
+    };
+    const handleVisibility = () => {
+      const sec = loadSecuritySettings();
+      if (document.visibilityState === "hidden") {
+        if (sec.hideBalancesInRecents) setBackgroundMasked(true);
+        if (sec.autoLockMinutes === 0 && unlocked) {
+          setUnlocked(false);
+        }
+      } else {
+        setBackgroundMasked(false);
+        if (unlocked && shouldAutoLock(lastActiveRef.current, Date.now(), sec.autoLockMinutes, true)) {
+          setUnlocked(false);
+        }
+      }
+    };
+    const interval = window.setInterval(() => {
+      const sec = loadSecuritySettings();
+      if (unlocked && sec.autoLockMinutes > 0 && shouldAutoLock(lastActiveRef.current, Date.now(), sec.autoLockMinutes, true)) {
+        setUnlocked(false);
+      }
+    }, 15_000);
+
+    window.addEventListener("pointerdown", recordActivity, { passive: true });
+    window.addEventListener("keydown", recordActivity, { passive: true });
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("pointerdown", recordActivity);
+      window.removeEventListener("keydown", recordActivity);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [pinHash, unlocked]);
+
+  // Automatic Google Drive sync when store changes or when coming back online
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const unsubscribe = useFinance.subscribe(() => {
+    const triggerAutoSync = () => {
       const prefs = loadDriveSyncPrefs();
       const clientId = getConfiguredGoogleClientId();
       if (!prefs.autoSync || !clientId || !getCachedGoogleToken()) return;
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         const controller = getGoogleDriveSyncController(clientId);
         const state = useFinance.getState();
         void controller
-          .sync(pickFinanceData(state), getLocalUpdatedAt())
+          .sync(pickFinanceData(state), getLocalUpdatedAt(), { conflictMode: "auto" })
           .then((res) => {
             if (res.source === "remote") {
               state.replaceAll({ ...res.data, demo: false }, res.remoteUpdatedAt ?? Date.now());
             }
             if (res.state.phase === "synced") {
+              setPendingCloudSync(false);
               saveDriveSyncPrefs({ ...loadDriveSyncPrefs(), lastSyncedAt: Date.now() });
             }
           })
           .catch(() => undefined);
       }, 2500);
-    });
+    };
+
+    const unsubscribe = useFinance.subscribe(triggerAutoSync);
+    const onOnline = () => {
+      if (getPendingCloudSync()) triggerAutoSync();
+    };
+    window.addEventListener("online", onOnline);
     return () => {
       if (timer) clearTimeout(timer);
       unsubscribe();
+      window.removeEventListener("online", onOnline);
     };
   }, []);
 
@@ -154,6 +286,7 @@ function App() {
     writePinHash(hash);
     setPinHashState(hash);
     if (!hash) setUnlocked(true);
+    else lastActiveRef.current = Date.now();
   }
 
   function pushRoute(next: Route) {
@@ -175,6 +308,16 @@ function App() {
     setStack([{ name: "main" }]);
     setQuery("");
     setCompact(false);
+  }
+
+  function openDebtsFiltered(filter: DebtTabFilter) {
+    setDebtFilter(filter);
+    setTab("debts");
+  }
+
+  function openLedgerFiltered(categoryId?: string) {
+    setLedgerCategoryFilter(categoryId ?? "");
+    setTab("ledger");
   }
 
   const title = heading(tab, route, people, debts, goals);
@@ -205,6 +348,13 @@ function App() {
         openRecurring: () => pushRoute({ name: "recurring" }),
         openNotifications: () => pushRoute({ name: "notifications" }),
         openDrive: () => pushRoute({ name: "drive" }),
+        openSecurity: () => pushRoute({ name: "security" }),
+        openDebtsFiltered,
+        openLedgerFiltered,
+        debtFilter,
+        setDebtFilter,
+        ledgerCategoryFilter,
+        setLedgerCategoryFilter,
         back,
         sheet,
         openSheet: setSheet,
@@ -226,12 +376,17 @@ function App() {
             onScroll={(e) => setCompact(e.currentTarget.scrollTop > 28)}
           >
             {locked ? (
-              <LockScreen onUnlock={() => setUnlocked(true)} />
+              <LockScreen
+                onUnlock={() => {
+                  lastActiveRef.current = Date.now();
+                  setUnlocked(true);
+                }}
+              />
             ) : (
               <>
                 <header className={cn("sticky top-0 z-20 pt-safe", compact && "glass")}>
                   <div className="flex h-14 items-center justify-between px-2">
-                    <div className="min-w-11">
+                    <div className="flex min-w-11 items-center">
                       {route.name !== "main" ? (
                         <button
                           type="button"
@@ -241,7 +396,16 @@ function App() {
                         >
                           <ChevronRight size={26} strokeWidth={2} />
                         </button>
-                      ) : null}
+                      ) : (
+                        <button
+                          type="button"
+                          className="flex min-h-11 min-w-11 items-center justify-center text-label-2"
+                          onClick={() => setSheet({ kind: "search" })}
+                          aria-label="بحث شامل"
+                        >
+                          <Search size={19} strokeWidth={2} />
+                        </button>
+                      )}
                     </div>
                     <p className="truncate text-headline font-semibold">
                       {compact || route.name !== "main" ? title : ""}
@@ -291,6 +455,8 @@ function App() {
                     <NotificationsScreen />
                   ) : route.name === "drive" ? (
                     <DriveSyncScreen />
+                  ) : route.name === "security" ? (
+                    <SecurityScreen />
                   ) : tab === "home" ? (
                     <HomeScreen />
                   ) : tab === "ledger" ? (
@@ -349,7 +515,20 @@ function App() {
             </nav>
           ) : null}
 
-          {sheet?.kind === "txn" ? <TxnForm key={sheet.id ?? "new-tx"} id={sheet.id} /> : null}
+          {backgroundMasked ? (
+            <div className="glass absolute inset-0 z-50 flex flex-col items-center justify-center px-6 text-center">
+              <p className="text-title1 font-bold text-label">ميزان</p>
+              <p className="mt-2 text-sub text-label-2">الخصوصية مفعّلة</p>
+            </div>
+          ) : null}
+
+          {sheet?.kind === "txn" ? (
+            <TxnForm
+              key={`${sheet.id ?? "new-tx"}-${sheet.prefill?.kind ?? "none"}-${sheet.prefill?.note ?? ""}`}
+              id={sheet.id}
+              prefill={sheet.prefill}
+            />
+          ) : null}
           {sheet?.kind === "person" ? <PersonForm key={sheet.id ?? "new-person"} id={sheet.id} /> : null}
           {sheet?.kind === "debt" ? <DebtForm key={sheet.id ?? "new-debt"} id={sheet.id} /> : null}
           {sheet?.kind === "pay" ? <PayForm key={sheet.debtId} debtId={sheet.debtId} /> : null}
@@ -367,6 +546,7 @@ function App() {
             />
           ) : null}
           {sheet?.kind === "pin" ? <PinForm /> : null}
+          {sheet?.kind === "search" ? <UnifiedSearchSheet /> : null}
           <Toaster position="top-center" dir="rtl" offset={12} />
         </div>
       </div>
@@ -390,6 +570,7 @@ function heading(
   if (route.name === "recurring") return "المتكرر";
   if (route.name === "notifications") return "الإشعارات والمهام";
   if (route.name === "drive") return "مزامنة Google Drive";
+  if (route.name === "security") return "الأمان والخصوصية";
   if (tab === "home") return "اليوم";
   if (tab === "ledger") return "السجل";
   if (tab === "debts") return "الديون";
