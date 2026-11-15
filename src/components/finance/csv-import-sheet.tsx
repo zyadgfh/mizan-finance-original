@@ -57,13 +57,13 @@ export function CsvImportSheet() {
       }
     >
       <div className="px-4 pt-2">
-        <label className="surface-card flex cursor-pointer items-center justify-center gap-2 rounded-cell px-4 py-4 text-sub font-semibold text-tint active:opacity-80">
+        <label className="surface-card relative flex cursor-pointer items-center justify-center gap-2 rounded-cell px-4 py-4 text-sub font-semibold text-tint active:opacity-80">
           <Upload size={18} />
           <span>{lang === "en" ? "Choose CSV File" : "اختر ملف CSV من جهازك"}</span>
           <input
             type="file"
             accept=".csv,text/csv,text/plain"
-            className="hidden"
+            className="sr-only"
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = "";

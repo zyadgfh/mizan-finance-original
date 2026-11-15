@@ -1,12 +1,20 @@
+import { Check } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import {
+  AppleDesignStudioContent,
+  AppleWalletCard,
+  defaultCardDesignForKind,
+  WALLET_CARD_DESIGNS,
+} from "@/components/finance/apple-cards";
 import { useMizan } from "@/components/finance/context";
 import { PillButton, Section, Segment, Sheet } from "@/components/finance/ui";
 import { cn } from "@/lib/cn";
+import { useI18n } from "@/lib/finance/i18n";
 import { GOAL_CATEGORY_LABEL, goalSaved, remaining, round2, todayISO, walletBalance } from "@/lib/finance/logic";
 import { hashPin } from "@/lib/finance/pin";
 import { useFinance } from "@/lib/finance/store";
-import type { GoalCategory, TxKind, WalletKind } from "@/lib/finance/types";
+import type { GoalCategory, TxKind, WalletCardDesign, WalletKind } from "@/lib/finance/types";
 
 function parseAmount(raw: string) {
   const n = Number(raw.replace(",", ".").trim());
@@ -49,12 +57,23 @@ function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) =
   );
 }
 
-const KINDS: { id: WalletKind; label: string }[] = [
-  { id: "cash", label: "كاش" },
-  { id: "instapay", label: "إنستاباي" },
-  { id: "vodafone", label: "فودافون" },
-  { id: "bank", label: "بنك" },
-  { id: "other", label: "أخرى" },
+const KINDS: { id: WalletKind; label: string; labelEn: string }[] = [
+  { id: "cash", label: "كاش", labelEn: "Cash" },
+  { id: "card", label: "بطاقة بنكية", labelEn: "Bank Card" },
+  { id: "instapay", label: "إنستاباي", labelEn: "InstaPay" },
+  { id: "vodafone", label: "فودافون كاش", labelEn: "Mobile Wallet" },
+  { id: "bank", label: "حساب بنكي", labelEn: "Bank Account" },
+  { id: "other", label: "أخرى", labelEn: "Other" },
+];
+
+const QUICK_WALLET_NAMES: { label: string; kind: WalletKind; design: WalletCardDesign }[] = [
+  { label: "بطاقة البنك الأهلي", kind: "card", design: "emerald-cash" },
+  { label: "بطاقة CIB", kind: "card", design: "ocean-blue" },
+  { label: "فيزا المشتريات", kind: "card", design: "titanium-dark" },
+  { label: "فودافون كاش الشخصي", kind: "vodafone", design: "crimson-vodafone" },
+  { label: "إنستاباي الأساسي", kind: "instapay", design: "royal-purple" },
+  { label: "كاش المحفظة", kind: "cash", design: "emerald-cash" },
+  { label: "حساب التوفير", kind: "bank", design: "sunset-gold" },
 ];
 
 export function TransferForm() {
@@ -131,57 +150,226 @@ export function TransferForm() {
 
 export function WalletForm({ id }: { id?: string }) {
   const { closeSheet, frame } = useMizan();
-  const wallets = useFinance((s) => s.wallets);
+  const { lang } = useI18n();
+  const data = useFinance();
+  const wallets = data.wallets;
   const existing = wallets.find((w) => w.id === id);
   const addWallet = useFinance((s) => s.addWallet);
   const updateWallet = useFinance((s) => s.updateWallet);
   const removeWallet = useFinance((s) => s.removeWallet);
   const [name, setName] = useState(existing?.name ?? "");
-  const [kind, setKind] = useState<WalletKind>(existing?.kind ?? "other");
+  const [kind, setKind] = useState<WalletKind>(existing?.kind ?? "card");
   const [opening, setOpening] = useState(existing ? String(existing.opening) : "0");
+  const [cardDesign, setCardDesign] = useState<WalletCardDesign>(
+    existing?.cardDesign ?? defaultCardDesignForKind(existing?.kind ?? "card"),
+  );
+  const [designTouched, setDesignTouched] = useState(Boolean(existing?.cardDesign));
+  const [subtitle, setSubtitle] = useState(existing?.subtitle ?? "");
+  const [last4, setLast4] = useState(existing?.last4 ?? "");
+
+  const parsedOpening = parseAmount(opening || "0");
+  const previewBalance = existing
+    ? walletBalance(existing.id, data) - existing.opening + (Number.isFinite(parsedOpening) ? parsedOpening : 0)
+    : Number.isFinite(parsedOpening)
+      ? parsedOpening
+      : 0;
+
+  function handleKindChange(nextKind: WalletKind) {
+    setKind(nextKind);
+    if (!designTouched) {
+      setCardDesign(defaultCardDesignForKind(nextKind));
+    }
+  }
 
   function save() {
     const n = parseAmount(opening || "0");
     if (!name.trim()) {
-      toast("اكتب اسم المحفظة");
+      toast(lang === "en" ? "Enter card or wallet name" : "اكتب اسم البطاقة أو المحفظة");
       return;
     }
     if (!Number.isFinite(n) || n < 0) {
-      toast("الافتتاحي لا يكون سالباً");
+      toast(lang === "en" ? "Opening balance cannot be negative" : "الافتتاحي لا يكون سالباً");
       return;
     }
-    if (existing) updateWallet(existing.id, { name, kind, opening: n });
-    else addWallet({ name, kind, opening: n });
-    toast(existing ? "تم تعديل المحفظة" : "أُضيفت المحفظة");
+    const payload = {
+      name: name.trim(),
+      kind,
+      opening: n,
+      cardDesign,
+      subtitle,
+      last4,
+    };
+    if (existing) updateWallet(existing.id, payload);
+    else addWallet(payload);
+    toast(
+      existing
+        ? lang === "en"
+          ? "Card / wallet updated"
+          : "تم تعديل اسم وتصميم البطاقة / المحفظة"
+        : lang === "en"
+          ? "Card / wallet added"
+          : "أُضيفت البطاقة / المحفظة",
+    );
     closeSheet();
   }
 
   return (
-    <Sheet title={existing ? "تعديل محفظة" : "محفظة جديدة"} description="حساب نقدي" container={frame} onClose={closeSheet} trailing={<PillButton onClick={save}>حفظ</PillButton>}>
-      <Section>
+    <Sheet
+      title={
+        existing
+          ? lang === "en"
+            ? "Edit Card / Wallet"
+            : "تعديل البطاقة / المحفظة"
+          : lang === "en"
+            ? "New Card / Wallet"
+            : "بطاقة أو محفظة جديدة"
+      }
+      description={lang === "en" ? "Customize name, type & Apple Card style" : "تعديل الاسم والنوع وتصميم Apple Wallet"}
+      container={frame}
+      onClose={closeSheet}
+      trailing={<PillButton onClick={save}>{lang === "en" ? "Save" : "حفظ"}</PillButton>}
+    >
+      {/* Live Apple Card Preview */}
+      <div className="px-4 pt-2">
+        <AppleWalletCard
+          wallet={{
+            id: existing?.id ?? "preview",
+            name: name.trim() || (lang === "en" ? "Card / Wallet Name" : "اسم البطاقة أو المحفظة"),
+            kind,
+            opening: Number.isFinite(parsedOpening) ? parsedOpening : 0,
+            cardDesign,
+            subtitle: subtitle.trim() || undefined,
+            last4: last4.trim() || undefined,
+            createdAt: 1,
+          }}
+          balance={previewBalance}
+          currency={data.currency}
+        />
+      </div>
+
+      {/* Quick Preset Names */}
+      <div className="mt-3 flex gap-1.5 overflow-x-auto px-4 pb-1 no-scrollbar">
+        {QUICK_WALLET_NAMES.map((preset) => (
+          <button
+            key={preset.label}
+            type="button"
+            onClick={() => {
+              setName(preset.label);
+              setKind(preset.kind);
+              if (!designTouched) setCardDesign(preset.design);
+            }}
+            className="shrink-0 rounded-pill bg-fill px-3 py-1.5 text-[12px] font-semibold text-label active:opacity-80"
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+
+      <Section title={lang === "en" ? "Name & Details" : "الاسم والبيانات"}>
         <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
-            <span className="w-16 shrink-0 text-body">الاسم</span>
-            <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="مثال: كاش البيت" />
+            <span className="w-24 shrink-0 text-body font-medium">
+              {lang === "en" ? "Name" : "الاسم"}
+            </span>
+            <input
+              className="field font-semibold"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={lang === "en" ? "e.g. CIB Visa / Cash" : "مثال: بطاقة البنك الأهلي / كاش"}
+            />
           </label>
           <div className="row-sep" />
           <label className="flex min-h-11 items-center gap-3 px-4">
-            <span className="w-16 shrink-0 text-body">افتتاحي</span>
-            <input className="field" dir="ltr" inputMode="decimal" value={opening} onChange={(e) => setOpening(e.target.value.replace(/[^\d.]/g, ""))} />
-          </label>
-          <div className="row-sep" />
-          <label className="flex min-h-11 items-center gap-3 px-4">
-            <span className="w-16 shrink-0 text-body">النوع</span>
-            <select className="field" value={kind} onChange={(e) => setKind(e.target.value as WalletKind)}>
+            <span className="w-24 shrink-0 text-body">
+              {lang === "en" ? "Type" : "النوع"}
+            </span>
+            <select
+              className="field"
+              value={kind}
+              onChange={(e) => handleKindChange(e.target.value as WalletKind)}
+            >
               {KINDS.map((k) => (
                 <option key={k.id} value={k.id}>
-                  {k.label}
+                  {lang === "en" ? k.labelEn : k.label}
                 </option>
               ))}
             </select>
           </label>
+          <div className="row-sep" />
+          <label className="flex min-h-11 items-center gap-3 px-4">
+            <span className="w-24 shrink-0 text-body">
+              {lang === "en" ? "Opening" : "افتتاحي"}
+            </span>
+            <input
+              className="field num"
+              dir="ltr"
+              inputMode="decimal"
+              value={opening}
+              onChange={(e) => setOpening(e.target.value.replace(/[^\d.]/g, ""))}
+            />
+          </label>
+          <div className="row-sep" />
+          <label className="flex min-h-11 items-center gap-3 px-4">
+            <span className="w-24 shrink-0 text-body">
+              {lang === "en" ? "Label" : "وصف مختصر"}
+            </span>
+            <input
+              className="field"
+              value={subtitle}
+              onChange={(e) => setSubtitle(e.target.value)}
+              placeholder={lang === "en" ? "Optional (e.g. Salary Card)" : "اختياري (مثال: بطاقة المرتب)"}
+            />
+          </label>
+          <div className="row-sep" />
+          <label className="flex min-h-11 items-center gap-3 px-4">
+            <span className="w-24 shrink-0 text-body">
+              {lang === "en" ? "Last 4 Digits" : "آخر 4 أرقام"}
+            </span>
+            <input
+              className="field num"
+              dir="ltr"
+              inputMode="numeric"
+              maxLength={4}
+              value={last4}
+              onChange={(e) => setLast4(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              placeholder="1234"
+            />
+          </label>
         </div>
       </Section>
+
+      <Section title={lang === "en" ? "Apple Card Finish" : "تصميم ولون البطاقة (Apple Wallet)"}>
+        <div className="grid grid-cols-4 gap-2.5 px-4">
+          {WALLET_CARD_DESIGNS.map((d) => {
+            const active = cardDesign === d.id;
+            return (
+              <button
+                key={d.id}
+                type="button"
+                onClick={() => {
+                  setCardDesign(d.id);
+                  setDesignTouched(true);
+                }}
+                className={cn(
+                  "flex flex-col items-center gap-1.5 rounded-cell p-2 transition",
+                  active ? "bg-[var(--tint-soft)] ring-2 ring-[var(--tint)]" : "bg-fill/60",
+                )}
+              >
+                <span
+                  className="relative flex h-9 w-full items-center justify-center rounded-lg shadow-sm"
+                  style={{ background: d.background, color: d.textColor }}
+                >
+                  {active ? <Check size={15} strokeWidth={2.8} /> : null}
+                </span>
+                <span className="w-full truncate text-center text-[10px] font-semibold text-label">
+                  {lang === "en" ? d.nameEn : d.nameAr}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </Section>
+
       {existing && existing.id !== "w-cash" ? (
         <div className="mt-6 flex justify-center">
           <PillButton
@@ -189,17 +377,43 @@ export function WalletForm({ id }: { id?: string }) {
             onClick={() => {
               const ok = removeWallet(existing.id);
               if (!ok) {
-                toast("المحفظة مستخدمة في حركات");
+                toast(lang === "en" ? "Wallet has linked transactions" : "البطاقة / المحفظة مستخدمة في حركات");
                 return;
               }
-              toast("حُذفت المحفظة");
+              toast(lang === "en" ? "Card / wallet deleted" : "حُذفت البطاقة / المحفظة");
               closeSheet();
             }}
           >
-            حذف المحفظة
+            {lang === "en" ? "Delete Card / Wallet" : "حذف البطاقة / المحفظة"}
           </PillButton>
         </div>
       ) : null}
+    </Sheet>
+  );
+}
+
+export function DesignStudioSheet() {
+  const { closeSheet, openSheet, frame } = useMizan();
+  const { lang } = useI18n();
+  const wallets = useFinance((s) => s.wallets);
+
+  return (
+    <Sheet
+      title={lang === "en" ? "Apple Designs & Cards" : "تصميمات Apple والبطاقات"}
+      description={lang === "en" ? "Choose theme and edit card/wallet names" : "اختيار المظهر وتعديل أسماء البطاقات والمحافظ"}
+      container={frame}
+      onClose={closeSheet}
+      trailing={
+        <PillButton onClick={closeSheet}>
+          {lang === "en" ? "Done" : "تم"}
+        </PillButton>
+      }
+    >
+      <AppleDesignStudioContent
+        wallets={wallets}
+        onEditWallet={(walletId) => openSheet({ kind: "wallet", id: walletId })}
+        onAddWallet={() => openSheet({ kind: "wallet" })}
+      />
     </Sheet>
   );
 }

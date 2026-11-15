@@ -59,6 +59,7 @@ const CURRENCY_LABELS: Record<AppLanguage, Record<Currency, string>> = {
 const WALLET_KIND_LABELS: Record<AppLanguage, Record<WalletKind, string>> = {
   ar: {
     cash: "كاش",
+    card: "بطاقة بنكية",
     instapay: "إنستاباي",
     vodafone: "فودافون كاش",
     bank: "بنك",
@@ -66,6 +67,7 @@ const WALLET_KIND_LABELS: Record<AppLanguage, Record<WalletKind, string>> = {
   },
   en: {
     cash: "Cash",
+    card: "Bank Card",
     instapay: "InstaPay",
     vodafone: "Vodafone Cash",
     bank: "Bank",

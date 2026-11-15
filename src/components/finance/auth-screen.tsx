@@ -22,11 +22,12 @@ import {
   User,
   UserPlus,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { PillButton } from "@/components/finance/ui";
 import { useI18n } from "@/lib/finance/i18n";
-import { updateUiPrefs } from "@/lib/finance/prefs";
+import { APPLE_THEMES, updateUiPrefs, useUiPrefs } from "@/lib/finance/prefs";
+import { copyTextSafe, isNativeMobileApp } from "@/lib/mobile-safe";
 import {
   checkHasPlatformOwner,
   fetchPublicSignupConfig,
@@ -79,7 +80,7 @@ export function AuthScreen({
   const [proofDataUrl, setProofDataUrl] = useState<string | null>(null);
   const [proofFileName, setProofFileName] = useState<string>("");
   const [compressingProof, setCompressingProof] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uiPrefs = useUiPrefs();
 
   // Public plans & receiver info
   const [plans, setPlans] = useState<SubscriptionPlan[]>(DEFAULT_SUBSCRIPTION_PLANS);
@@ -96,10 +97,27 @@ export function AuthScreen({
   const [showInviteField, setShowInviteField] = useState(Boolean(initialInviteCode));
   const [needsOwnerBootstrap, setNeedsOwnerBootstrap] = useState(false);
 
-  const isNativeCap =
-    typeof window !== "undefined" &&
-    (window.location.protocol.startsWith("capacitor") ||
-      Boolean((window as unknown as { MizanNative?: unknown }).MizanNative));
+  const isNativeCap = isNativeMobileApp();
+
+  // Android hardware back-button support across multi-step signup & password recovery
+  useEffect(() => {
+    const win = window as Window & { __mizanBack?: () => boolean };
+    const prev = win.__mizanBack;
+    win.__mizanBack = () => {
+      if (view === "signup" && signupStep === "payment") {
+        setSignupStep("account");
+        return true;
+      }
+      if (view !== "signin") {
+        setView("signin");
+        return true;
+      }
+      return typeof prev === "function" ? prev() : false;
+    };
+    return () => {
+      win.__mizanBack = prev;
+    };
+  }, [view, signupStep]);
 
   useEffect(() => {
     let active = true;
@@ -126,10 +144,10 @@ export function AuthScreen({
 
   const copyReceiverValue = async (val: string, label: string) => {
     if (!val) return;
-    try {
-      await navigator.clipboard.writeText(val);
+    const copied = await copyTextSafe(val);
+    if (copied) {
       toast.success(isAr ? `تم نسخ ${label}` : `${label} copied`);
-    } catch {
+    } else {
       toast.info(val);
     }
   };
@@ -317,8 +335,8 @@ export function AuthScreen({
   };
 
   return (
-    <div className="min-h-dvh bg-[var(--surround)] flex flex-col items-center justify-center p-4 sm:p-6">
-      <div className="w-full max-w-md bg-[var(--surface)] rounded-[28px] border border-[var(--sep)] shadow-[0_24px_60px_rgba(0,0,0,0.08)] p-5 sm:p-7 space-y-5">
+    <div className="min-h-full w-full bg-[var(--surround)] flex flex-col items-center justify-start sm:justify-center p-4 pt-safe pb-safe sm:p-6">
+      <div className="my-auto w-full max-w-md bg-[var(--surface)] rounded-[28px] border border-[var(--sep)] shadow-[0_24px_60px_rgba(0,0,0,0.08)] p-5 sm:p-7 space-y-5">
         {/* Header */}
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-3">
@@ -345,6 +363,31 @@ export function AuthScreen({
             <Globe className="w-3.5 h-3.5" strokeWidth={1.8} />
             {isAr ? "EN" : "AR"}
           </button>
+        </div>
+
+        {/* Instant /appledesign1 Theme Bar */}
+        <div className="flex items-center justify-between gap-2 rounded-2xl bg-[var(--fill)] px-3 py-2">
+          <span className="text-[11px] font-semibold text-[var(--label-2)]">
+            {isAr ? "تصميم Apple:" : "Apple Theme:"}
+          </span>
+          <div className="flex items-center gap-1.5">
+            {APPLE_THEMES.map((th) => {
+              const active = uiPrefs.appleTheme === th.id;
+              return (
+                <button
+                  key={th.id}
+                  type="button"
+                  onClick={() => updateUiPrefs({ appleTheme: th.id })}
+                  title={isAr ? th.nameAr : th.nameEn}
+                  aria-label={isAr ? th.nameAr : th.nameEn}
+                  className={`h-6 w-6 rounded-full transition ${
+                    active ? "scale-110 ring-2 ring-[var(--label)] ring-offset-1 ring-offset-[var(--surface)]" : "opacity-75"
+                  }`}
+                  style={{ background: th.swatch }}
+                />
+              );
+            })}
+          </div>
         </div>
 
         {/* Main Mode Switcher: Sign In vs Register New Account */}
@@ -839,24 +882,23 @@ export function AuthScreen({
 
                 {/* Upload Transfer Screenshot */}
                 <div className="space-y-1.5">
-                  <label className="text-[12px] font-bold text-[var(--label)] block">
+                  <span className="text-[12px] font-bold text-[var(--label)] block">
                     {isAr ? "صورة إيصال التحويل (لقطة شاشة التحويل) *" : "Transfer Screenshot / Receipt *"}
-                  </label>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => void handleSelectProofFile(e)}
-                    className="hidden"
-                  />
+                  </span>
 
                   {!proofDataUrl ? (
-                    <button
-                      type="button"
-                      disabled={compressingProof}
-                      onClick={() => fileInputRef.current?.click()}
-                      className="w-full py-5 px-4 rounded-2xl border-2 border-dashed border-[var(--sep)] hover:border-[var(--tint)] bg-[var(--fill)] flex flex-col items-center justify-center gap-1.5 transition"
+                    <label
+                      className={`relative w-full py-5 px-4 rounded-2xl border-2 border-dashed border-[var(--sep)] hover:border-[var(--tint)] bg-[var(--fill)] flex flex-col items-center justify-center gap-1.5 transition cursor-pointer active:opacity-85 ${
+                        compressingProof ? "pointer-events-none opacity-60" : ""
+                      }`}
                     >
+                      <input
+                        type="file"
+                        accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif"
+                        disabled={compressingProof}
+                        onChange={(e) => void handleSelectProofFile(e)}
+                        className="sr-only"
+                      />
                       <ImagePlus className="w-7 h-7 text-[var(--tint)]" />
                       <span className="text-[13px] font-bold text-[var(--label)]">
                         {compressingProof
@@ -867,10 +909,10 @@ export function AuthScreen({
                             ? "اضغط لرفع صورة التحويل"
                             : "Tap to Upload Transfer Screenshot"}
                       </span>
-                      <span className="text-[11px] text-[var(--label-3)]">
+                      <span className="text-[11px] text-[var(--label-3)] text-center">
                         {isAr ? "صورة واضحة لإشعار إنستا باي أو فودافون كاش" : "Clear screenshot of the transfer"}
                       </span>
-                    </button>
+                    </label>
                   ) : (
                     <div className="p-2.5 rounded-2xl bg-[var(--fill)] border border-[var(--tint)] space-y-2">
                       <div className="flex items-center justify-between gap-2">
@@ -878,14 +920,17 @@ export function AuthScreen({
                           <Check className="w-4 h-4" />
                           {isAr ? "تم إرفاق صورة التحويل" : "Screenshot attached"}
                         </span>
-                        <button
-                          type="button"
-                          onClick={() => fileInputRef.current?.click()}
-                          className="h-7 px-2.5 rounded-lg bg-[var(--surface)] text-[11px] font-semibold flex items-center gap-1"
-                        >
+                        <label className="relative h-8 px-3 rounded-lg bg-[var(--surface)] text-[11px] font-semibold flex items-center gap-1 cursor-pointer active:opacity-80">
+                          <input
+                            type="file"
+                            accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif"
+                            disabled={compressingProof}
+                            onChange={(e) => void handleSelectProofFile(e)}
+                            className="sr-only"
+                          />
                           <Upload className="w-3 h-3" />
-                          {isAr ? "تغيير الصورة" : "Replace"}
-                        </button>
+                          <span>{isAr ? "تغيير الصورة" : "Replace"}</span>
+                        </label>
                       </div>
                       <img
                         src={proofDataUrl}

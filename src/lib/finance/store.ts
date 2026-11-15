@@ -20,6 +20,7 @@ import { writePinHash } from "./pin.ts";
 import { clearReceipts, exportAllReceipts, importAllReceipts } from "./receipts.ts";
 import { overwriteAndClearLocalKeys } from "./security.ts";
 import { seedData } from "./seed.ts";
+import { safeRandomUUID } from "../mobile-safe.ts";
 import {
   diffFinanceDataToOps,
   enqueueTenantOutboxOps,
@@ -47,6 +48,7 @@ import type {
   Tx,
   TxKind,
   Wallet,
+  WalletCardDesign,
   WalletKind,
 } from "./types.ts";
 
@@ -179,8 +181,25 @@ type Actions = {
   setExchangeRate: (currency: Currency, rate: number) => void;
   setPhoneCountryCode: (code: string) => void;
   importTransactionsBulk: (inputs: TxInput[]) => number;
-  addWallet: (input: { name: string; kind: WalletKind; opening: number }) => string;
-  updateWallet: (id: string, input: { name: string; kind: WalletKind; opening: number }) => void;
+  addWallet: (input: {
+    name: string;
+    kind: WalletKind;
+    opening: number;
+    cardDesign?: WalletCardDesign;
+    last4?: string;
+    subtitle?: string;
+  }) => string;
+  updateWallet: (
+    id: string,
+    input: {
+      name: string;
+      kind: WalletKind;
+      opening: number;
+      cardDesign?: WalletCardDesign;
+      last4?: string;
+      subtitle?: string;
+    },
+  ) => void;
   removeWallet: (id: string) => boolean;
   addTransfer: (input: { fromId: string; toId: string; amount: number; date: string; note: string }) => string | null;
   removeTransfer: (id: string) => Transfer | undefined;
@@ -203,7 +222,7 @@ type Actions = {
 };
 
 function uid() {
-  return crypto.randomUUID();
+  return safeRandomUUID();
 }
 
 const DEBT_CATS: Category[] = [
@@ -721,11 +740,16 @@ export const useFinance = create<Data & Actions>((set, get) => ({
   },
   addWallet: (input) => {
     const id = uid();
+    const cleanLast4 = input.last4 ? input.last4.replace(/\D/g, "").slice(-4) : undefined;
+    const cleanSubtitle = input.subtitle?.trim().slice(0, 40) || undefined;
     const wallet: Wallet = {
       id,
       name: input.name.trim() || "محفظة",
       kind: input.kind,
       opening: round2(Math.max(0, input.opening)),
+      cardDesign: input.cardDesign,
+      last4: cleanLast4 || undefined,
+      subtitle: cleanSubtitle,
       createdAt: Date.now(),
       ...actorMeta(),
     };
@@ -733,6 +757,10 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     return id;
   },
   updateWallet: (id, input) => {
+    const cleanLast4 =
+      input.last4 !== undefined ? input.last4.replace(/\D/g, "").slice(-4) || undefined : undefined;
+    const cleanSubtitle =
+      input.subtitle !== undefined ? input.subtitle.trim().slice(0, 40) || undefined : undefined;
     set({
       wallets: get().wallets.map((w) =>
         w.id === id
@@ -741,6 +769,9 @@ export const useFinance = create<Data & Actions>((set, get) => ({
               name: input.name.trim() || w.name,
               kind: input.kind,
               opening: round2(Math.max(0, input.opening)),
+              cardDesign: input.cardDesign !== undefined ? input.cardDesign : w.cardDesign,
+              last4: input.last4 !== undefined ? cleanLast4 : w.last4,
+              subtitle: input.subtitle !== undefined ? cleanSubtitle : w.subtitle,
               ...actorMeta(w),
             }
           : w,

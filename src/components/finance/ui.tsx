@@ -439,7 +439,7 @@ export function Sheet({
               <div className="flex min-w-11 justify-end">{trailing}</div>
             </div>
             <Dialog.Description className="sr-only">{description}</Dialog.Description>
-            <div className="min-h-0 flex-1 overflow-y-auto pb-8">{children}</div>
+            <div className="sheet-scroll-safe min-h-0 flex-1 overflow-y-auto overscroll-y-contain">{children}</div>
           </Dialog.Content>
         </div>
       </Dialog.Portal>

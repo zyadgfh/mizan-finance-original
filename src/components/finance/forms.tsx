@@ -20,6 +20,7 @@ import {
 import { compressReceipt, deleteReceipt, loadReceipt, saveReceipt } from "@/lib/finance/receipts";
 import { useFinance } from "@/lib/finance/store";
 import { CURRENCIES, type Currency, type DebtCadence, type DebtDirection, type TxKind } from "@/lib/finance/types";
+import { safeRandomUUID } from "@/lib/mobile-safe";
 import { clearCachedGoogleToken } from "@/lib/sync/google-drive-gis";
 
 function parseAmount(raw: string) {
@@ -102,7 +103,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
       ? 1
       : existing?.exchangeRate ?? effectiveExchangeRate(initialCurrency, accountCurrency, exchangeRates);
 
-  const [draftId] = useState(() => existing?.id ?? crypto.randomUUID());
+  const [draftId] = useState(() => existing?.id ?? safeRandomUUID());
   const [kind, setKind] = useState<TxKind>(initialKind);
   const [amount, setAmount] = useState(
     existing ? String(existing.amount) : prefill?.amount ? String(prefill.amount) : "",
@@ -453,12 +454,12 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
           <div className="row-sep" />
           <div className="flex min-h-11 items-center justify-between gap-3 px-4">
             <span className="text-body">{lang === "en" ? "Receipt" : "إيصال"}</span>
-            <label className="text-sub font-semibold text-tint">
+            <label className="relative cursor-pointer py-2 text-sub font-semibold text-tint active:opacity-80">
               {receiptOn ? (lang === "en" ? "Replace" : "استبدال") : lang === "en" ? "Attach Image" : "إرفاق صورة"}
               <input
                 type="file"
-                accept="image/*"
-                className="hidden"
+                accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif"
+                className="sr-only"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   e.target.value = "";

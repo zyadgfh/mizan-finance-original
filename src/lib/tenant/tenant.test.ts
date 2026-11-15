@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { sanitizeErrorRecord } from "../finance/error-log.ts";
+import { APPLE_THEMES, loadUiPrefs, updateUiPrefs } from "../finance/prefs.ts";
 import { seedData } from "../finance/seed.ts";
+import { safeRandomUUID } from "../mobile-safe.ts";
 import {
   clearFinanceTenantScope,
   hydrateTenantFinance,
@@ -377,4 +379,57 @@ test("4-tier packages & automatic subscription expiration gate work accurately",
   // Super-Admin is never blocked
   assert.equal(getSubscriptionAccessBlock(expiredActiveWs, true), null);
 });
+
+test("Mobile UUID, /appledesign1 themes, and Apple Wallet card rename/customization persist cleanly", () => {
+  const uuid1 = safeRandomUUID();
+  const uuid2 = safeRandomUUID();
+  assert.match(uuid1, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.notEqual(uuid1, uuid2);
+
+  const mem = new MemoryStorage();
+  assert.equal(APPLE_THEMES.length, 6);
+  updateUiPrefs(
+    {
+      appleTheme: "titanium-pro",
+      colorMode: "dark",
+      cardsSectionTitle: "محافظي الذهبية",
+    },
+    mem,
+  );
+  const loadedPrefs = loadUiPrefs(mem);
+  assert.equal(loadedPrefs.appleTheme, "titanium-pro");
+  assert.equal(loadedPrefs.colorMode, "dark");
+  assert.equal(loadedPrefs.cardsSectionTitle, "محافظي الذهبية");
+
+  // Rename default cash wallet and add custom bank card with Apple Card skin & last4
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: mem });
+  useFinance.setState(seedData());
+  useFinance.getState().updateWallet("w-cash", {
+    name: "كاش الجيب اليومي",
+    kind: "cash",
+    opening: 1500,
+    cardDesign: "emerald-cash",
+    subtitle: "مصروف البيت",
+  });
+  const cashWallet = useFinance.getState().wallets.find((w) => w.id === "w-cash");
+  assert.equal(cashWallet?.name, "كاش الجيب اليومي");
+  assert.equal(cashWallet?.cardDesign, "emerald-cash");
+  assert.equal(cashWallet?.subtitle, "مصروف البيت");
+
+  const newCardId = useFinance.getState().addWallet({
+    name: "بطاقة CIB Platinum",
+    kind: "card",
+    opening: 12000,
+    cardDesign: "titanium-dark",
+    last4: "98421",
+    subtitle: "بطاقة المشتريات",
+  });
+  const addedCard = useFinance.getState().wallets.find((w) => w.id === newCardId);
+  assert.equal(addedCard?.name, "بطاقة CIB Platinum");
+  assert.equal(addedCard?.kind, "card");
+  assert.equal(addedCard?.cardDesign, "titanium-dark");
+  assert.equal(addedCard?.last4, "8421");
+  clearFinanceTenantScope();
+});
+
 

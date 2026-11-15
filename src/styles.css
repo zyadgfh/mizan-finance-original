@@ -1,32 +1,45 @@
 @import "tailwindcss";
 @import "sonner/dist/styles.css";
 
+/* ==========================================================================
+   Mizan Finance — /appledesign1 Multi-Theme Design System
+   6 Signature Apple Aesthetics × Light / Dark / System Modes
+   ========================================================================== */
+
 :root {
   color-scheme: light;
   --label: #000000;
-  --label-2: rgba(60, 60, 67, 0.6);
-  --label-3: rgba(60, 60, 67, 0.34);
-  --separator: rgba(60, 60, 67, 0.22);
+  --label-2: rgba(60, 60, 67, 0.64);
+  --label-3: rgba(60, 60, 67, 0.36);
+  --separator: rgba(60, 60, 67, 0.2);
+  --sep: var(--separator);
   --bg-grouped: #f2f2f7;
   --bg-grouped-cell: #ffffff;
+  --surface: var(--bg-grouped-cell);
   --bg-3: #ffffff;
   --fill: #e5e5ea;
-  --tint: #0088ff;
+  --tint: #007aff;
+  --tint-soft: rgba(0, 122, 255, 0.12);
   --green: #34c759;
-  --red: #ff383c;
-  --orange: #ff8d28;
+  --green-soft: rgba(52, 199, 89, 0.13);
+  --red: #ff3b30;
+  --red-soft: rgba(255, 59, 48, 0.12);
+  --orange: #ff9500;
+  --orange-soft: rgba(255, 149, 0, 0.14);
   --gray: #8e8e93;
   --on-tint: #ffffff;
-  --surround: #d1d1d6;
-  --glass: rgba(255, 255, 255, 0.72);
+  --surround: #dfe3ec;
+  --glass: rgba(255, 255, 255, 0.76);
   --glass-shadow:
-    0 10px 32px rgba(0, 0, 0, 0.08),
-    inset 0 1px 0 rgba(255, 255, 255, 0.65),
-    inset 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+    0 12px 34px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82),
+    inset 0 0 0 0.5px rgba(15, 23, 42, 0.07);
   --shadow-card:
-    0 2px 10px rgba(0, 0, 0, 0.035),
-    0 0 0 0.5px rgba(0, 0, 0, 0.055);
-  --shadow-border: 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+    0 4px 16px rgba(15, 23, 42, 0.045),
+    inset 0 1px 0 rgba(255, 255, 255, 0.75),
+    0 0 0 0.5px rgba(15, 23, 42, 0.06);
+  --shadow-border: 0 0 0 0.5px rgba(15, 23, 42, 0.08);
+  --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(0, 122, 255, 0.11) 0%, transparent 62%);
   --ease-apple: cubic-bezier(0.28, 0.11, 0.32, 1);
   --motion-spring: cubic-bezier(0.22, 1, 0.36, 1);
   --motion-press: cubic-bezier(0.28, 0.11, 0.32, 1);
@@ -35,36 +48,272 @@
   --normal-border: transparent;
 }
 
+/* ---------- Light Theme Variants ---------- */
+
+:root[data-apple-theme="liquid-glass"] {
+  --bg-grouped: #eef3fa;
+  --bg-grouped-cell: rgba(255, 255, 255, 0.86);
+  --surface: rgba(255, 255, 255, 0.9);
+  --surround: #dce5f2;
+  --fill: rgba(120, 132, 156, 0.15);
+  --tint: #007aff;
+  --tint-soft: rgba(0, 122, 255, 0.13);
+  --glass: rgba(255, 255, 255, 0.68);
+  --hero-glow:
+    radial-gradient(110% 85% at 100% 0%, rgba(0, 122, 255, 0.15) 0%, transparent 58%),
+    radial-gradient(90% 70% at 0% 100%, rgba(90, 200, 250, 0.12) 0%, transparent 55%);
+}
+
+:root[data-apple-theme="cupertino-classic"] {
+  --bg-grouped: #f5f5f7;
+  --bg-grouped-cell: #ffffff;
+  --surface: #ffffff;
+  --surround: #e5e5ea;
+  --fill: #e8e8ed;
+  --tint: #0066cc;
+  --tint-soft: rgba(0, 102, 204, 0.11);
+  --hero-glow: none;
+}
+
+:root[data-apple-theme="titanium-pro"] {
+  --bg-grouped: #f1efe9;
+  --bg-grouped-cell: #faf9f5;
+  --surface: #faf9f5;
+  --surround: #dfdacf;
+  --fill: #e4dfd4;
+  --tint: #9a721c;
+  --tint-soft: rgba(154, 114, 28, 0.14);
+  --glass: rgba(250, 249, 245, 0.8);
+  --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(197, 155, 67, 0.16) 0%, transparent 62%);
+}
+
+:root[data-apple-theme="emerald-vault"] {
+  --bg-grouped: #edf5f1;
+  --bg-grouped-cell: #ffffff;
+  --surface: #ffffff;
+  --surround: #d5e6de;
+  --fill: #dfece6;
+  --tint: #059669;
+  --tint-soft: rgba(5, 150, 105, 0.13);
+  --glass: rgba(255, 255, 255, 0.78);
+  --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(16, 185, 129, 0.15) 0%, transparent 62%);
+}
+
+:root[data-apple-theme="midnight-indigo"] {
+  --bg-grouped: #eff0fa;
+  --bg-grouped-cell: #ffffff;
+  --surface: #ffffff;
+  --surround: #dcdff2;
+  --fill: #e3e5f5;
+  --tint: #4f46e5;
+  --tint-soft: rgba(79, 70, 229, 0.13);
+  --glass: rgba(255, 255, 255, 0.78);
+  --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(99, 102, 241, 0.16) 0%, transparent 62%);
+}
+
+:root[data-apple-theme="desert-sand"] {
+  --bg-grouped: #f6f1eb;
+  --bg-grouped-cell: #fffcf8;
+  --surface: #fffcf8;
+  --surround: #e8ddd1;
+  --fill: #ede3d8;
+  --tint: #b45309;
+  --tint-soft: rgba(180, 83, 9, 0.13);
+  --glass: rgba(255, 252, 248, 0.8);
+  --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(217, 119, 6, 0.14) 0%, transparent 62%);
+}
+
+/* ---------- Shared Dark Mode Mixin via System or Explicit Dark ---------- */
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-color-mode="light"]) {
     color-scheme: dark;
     --label: #f5f5f7;
-    --label-2: rgba(235, 235, 245, 0.62);
-    --label-3: rgba(235, 235, 245, 0.34);
+    --label-2: rgba(235, 235, 245, 0.65);
+    --label-3: rgba(235, 235, 245, 0.36);
     --separator: rgba(84, 84, 88, 0.62);
-    --bg-grouped: #000000;
-    --bg-grouped-cell: #1c1c1e;
-    --bg-3: #2c2c2e;
-    --fill: #2c2c2e;
+    --sep: var(--separator);
+    --bg-grouped: #05070c;
+    --bg-grouped-cell: #161821;
+    --surface: #181b24;
+    --bg-3: #242834;
+    --fill: #252936;
     --tint: #0a84ff;
+    --tint-soft: rgba(10, 132, 255, 0.18);
     --green: #30d158;
+    --green-soft: rgba(48, 209, 88, 0.18);
     --red: #ff453a;
+    --red-soft: rgba(255, 69, 58, 0.18);
     --orange: #ff9f0a;
+    --orange-soft: rgba(255, 159, 10, 0.18);
     --gray: #8e8e93;
     --surround: #000000;
-    --glass: rgba(28, 28, 30, 0.72);
+    --glass: rgba(24, 27, 36, 0.74);
     --glass-shadow:
-      0 12px 36px rgba(0, 0, 0, 0.42),
-      inset 0 1px 0 rgba(255, 255, 255, 0.16),
+      0 14px 38px rgba(0, 0, 0, 0.48),
+      inset 0 1px 0 rgba(255, 255, 255, 0.14),
       inset 0 0 0 0.5px rgba(255, 255, 255, 0.1);
     --shadow-card:
-      0 4px 18px rgba(0, 0, 0, 0.3),
-      0 0 0 0.5px rgba(255, 255, 255, 0.075);
-    --shadow-border: 0 0 0 0.5px rgba(255, 255, 255, 0.1);
-    --normal-bg: #2c2c2e;
+      0 6px 20px rgba(0, 0, 0, 0.34),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 0 0 0.5px rgba(255, 255, 255, 0.08);
+    --shadow-border: 0 0 0 0.5px rgba(255, 255, 255, 0.11);
+    --normal-bg: #242834;
     --normal-text: #f5f5f7;
     --normal-border: transparent;
   }
+
+  :root:not([data-color-mode="light"])[data-apple-theme="cupertino-classic"] {
+    --bg-grouped: #000000;
+    --bg-grouped-cell: #1c1c1e;
+    --surface: #1c1c1e;
+    --fill: #2c2c2e;
+    --tint: #2997ff;
+    --tint-soft: rgba(41, 151, 255, 0.18);
+  }
+
+  :root:not([data-color-mode="light"])[data-apple-theme="titanium-pro"] {
+    --bg-grouped: #0c0b0a;
+    --bg-grouped-cell: #1b1917;
+    --surface: #1f1c19;
+    --fill: #2c2824;
+    --tint: #e2b857;
+    --tint-soft: rgba(226, 184, 87, 0.18);
+    --on-tint: #14110b;
+    --glass: rgba(28, 25, 22, 0.78);
+    --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(226, 184, 87, 0.16) 0%, transparent 62%);
+  }
+
+  :root:not([data-color-mode="light"])[data-apple-theme="emerald-vault"] {
+    --bg-grouped: #040d0a;
+    --bg-grouped-cell: #101f19;
+    --surface: #12241d;
+    --fill: #1b332a;
+    --tint: #34d399;
+    --tint-soft: rgba(52, 211, 153, 0.18);
+    --on-tint: #042117;
+    --glass: rgba(16, 31, 25, 0.78);
+    --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(52, 211, 153, 0.16) 0%, transparent 62%);
+  }
+
+  :root:not([data-color-mode="light"])[data-apple-theme="midnight-indigo"] {
+    --bg-grouped: #070816;
+    --bg-grouped-cell: #14162b;
+    --surface: #171a33;
+    --fill: #23274a;
+    --tint: #818cf8;
+    --tint-soft: rgba(129, 140, 248, 0.2);
+    --on-tint: #090a1a;
+    --glass: rgba(20, 22, 43, 0.78);
+    --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(129, 140, 248, 0.18) 0%, transparent 62%);
+  }
+
+  :root:not([data-color-mode="light"])[data-apple-theme="desert-sand"] {
+    --bg-grouped: #100c09;
+    --bg-grouped-cell: #211a15;
+    --surface: #241d17;
+    --fill: #332920;
+    --tint: #f59e0b;
+    --tint-soft: rgba(245, 158, 11, 0.18);
+    --on-tint: #1a1004;
+    --glass: rgba(33, 26, 21, 0.78);
+    --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(245, 158, 11, 0.16) 0%, transparent 62%);
+  }
+}
+
+/* Explicit Dark Mode Override (even when OS is Light) */
+:root[data-color-mode="dark"] {
+  color-scheme: dark;
+  --label: #f5f5f7;
+  --label-2: rgba(235, 235, 245, 0.65);
+  --label-3: rgba(235, 235, 245, 0.36);
+  --separator: rgba(84, 84, 88, 0.62);
+  --sep: var(--separator);
+  --bg-grouped: #05070c;
+  --bg-grouped-cell: #161821;
+  --surface: #181b24;
+  --bg-3: #242834;
+  --fill: #252936;
+  --tint: #0a84ff;
+  --tint-soft: rgba(10, 132, 255, 0.18);
+  --green: #30d158;
+  --green-soft: rgba(48, 209, 88, 0.18);
+  --red: #ff453a;
+  --red-soft: rgba(255, 69, 58, 0.18);
+  --orange: #ff9f0a;
+  --orange-soft: rgba(255, 159, 10, 0.18);
+  --gray: #8e8e93;
+  --surround: #000000;
+  --glass: rgba(24, 27, 36, 0.74);
+  --glass-shadow:
+    0 14px 38px rgba(0, 0, 0, 0.48),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.1);
+  --shadow-card:
+    0 6px 20px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 0 0.5px rgba(255, 255, 255, 0.08);
+  --shadow-border: 0 0 0 0.5px rgba(255, 255, 255, 0.11);
+  --normal-bg: #242834;
+  --normal-text: #f5f5f7;
+  --normal-border: transparent;
+}
+
+:root[data-color-mode="dark"][data-apple-theme="cupertino-classic"] {
+  --bg-grouped: #000000;
+  --bg-grouped-cell: #1c1c1e;
+  --surface: #1c1c1e;
+  --fill: #2c2c2e;
+  --tint: #2997ff;
+  --tint-soft: rgba(41, 151, 255, 0.18);
+}
+
+:root[data-color-mode="dark"][data-apple-theme="titanium-pro"] {
+  --bg-grouped: #0c0b0a;
+  --bg-grouped-cell: #1b1917;
+  --surface: #1f1c19;
+  --fill: #2c2824;
+  --tint: #e2b857;
+  --tint-soft: rgba(226, 184, 87, 0.18);
+  --on-tint: #14110b;
+  --glass: rgba(28, 25, 22, 0.78);
+  --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(226, 184, 87, 0.16) 0%, transparent 62%);
+}
+
+:root[data-color-mode="dark"][data-apple-theme="emerald-vault"] {
+  --bg-grouped: #040d0a;
+  --bg-grouped-cell: #101f19;
+  --surface: #12241d;
+  --fill: #1b332a;
+  --tint: #34d399;
+  --tint-soft: rgba(52, 211, 153, 0.18);
+  --on-tint: #042117;
+  --glass: rgba(16, 31, 25, 0.78);
+  --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(52, 211, 153, 0.16) 0%, transparent 62%);
+}
+
+:root[data-color-mode="dark"][data-apple-theme="midnight-indigo"] {
+  --bg-grouped: #070816;
+  --bg-grouped-cell: #14162b;
+  --surface: #171a33;
+  --fill: #23274a;
+  --tint: #818cf8;
+  --tint-soft: rgba(129, 140, 248, 0.2);
+  --on-tint: #090a1a;
+  --glass: rgba(20, 22, 43, 0.78);
+  --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(129, 140, 248, 0.18) 0%, transparent 62%);
+}
+
+:root[data-color-mode="dark"][data-apple-theme="desert-sand"] {
+  --bg-grouped: #100c09;
+  --bg-grouped-cell: #211a15;
+  --surface: #241d17;
+  --fill: #332920;
+  --tint: #f59e0b;
+  --tint-soft: rgba(245, 158, 11, 0.18);
+  --on-tint: #1a1004;
+  --glass: rgba(33, 26, 21, 0.78);
+  --hero-glow: radial-gradient(120% 90% at 100% 0%, rgba(245, 158, 11, 0.16) 0%, transparent 62%);
 }
 
 @theme inline {
@@ -86,9 +335,9 @@
   --color-on-tint: var(--on-tint);
   --color-surround: var(--surround);
   --radius-inner: 10px;
-  --radius-cell: 14px;
+  --radius-cell: 16px;
   --radius-card: 22px;
-  --radius-sheet: 24px;
+  --radius-sheet: 26px;
   --radius-pill: 980px;
   --text-largetitle: 34px;
   --text-largetitle--line-height: 41px;
@@ -118,6 +367,7 @@
   html,
   body {
     height: 100%;
+    height: 100dvh;
     width: 100%;
     max-width: 100%;
     margin: 0;
@@ -133,7 +383,10 @@
     width: 100%;
     max-width: 100vw;
     height: 100%;
-    overflow: hidden;
+    height: 100dvh;
+    overflow-x: hidden;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   body {
     font-family: var(--font-sans);
@@ -148,6 +401,12 @@
   p {
     text-wrap: pretty;
   }
+  button,
+  label[role="button"],
+  [role="button"] {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;
@@ -161,13 +420,22 @@
   }
 }
 
+/* Prevent iOS Safari & Android Chrome viewport zoom when focusing inputs */
+@media (max-width: 640px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not(.amount-input),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
 .icon-tile {
   display: grid;
-  width: 29px;
-  height: 29px;
+  width: 30px;
+  height: 30px;
   flex: none;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 9px;
   color: var(--on-tint);
 }
 .num {
@@ -180,17 +448,52 @@
 .surface-card {
   background: var(--bg-grouped-cell);
   box-shadow: var(--shadow-card);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
+}
+
+.apple-hero-surface {
+  background-color: var(--bg-grouped);
+  background-image: var(--hero-glow);
 }
 
 .glass {
   background: var(--glass);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(185%);
+  backdrop-filter: blur(24px) saturate(185%);
   box-shadow: var(--glass-shadow);
+}
+
+.apple-wallet-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: 20px;
+  box-shadow:
+    0 12px 28px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.22);
+  transition:
+    transform 180ms var(--motion-spring),
+    box-shadow 180ms ease;
+}
+
+.apple-wallet-card::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    125deg,
+    rgba(255, 255, 255, 0.24) 0%,
+    rgba(255, 255, 255, 0.05) 38%,
+    transparent 65%
+  );
 }
 
 .screen-content {
   transform-origin: 50% 0;
+  background-image: var(--hero-glow);
+  background-repeat: no-repeat;
 }
 
 .screen-content button,
@@ -208,12 +511,12 @@
 .screen-content button:active:not(:disabled),
 .screen-content [role="button"]:active:not(:disabled),
 .tab-bar button:active:not(:disabled) {
-  transform: scale(0.965);
+  transform: scale(0.968);
 }
 
 .tab-bar button[aria-current="page"] {
-  background: color-mix(in srgb, var(--tint) 14%, transparent);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--tint) 22%, transparent);
+  background: color-mix(in srgb, var(--tint) 15%, transparent);
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--tint) 24%, transparent);
 }
 
 .scroll-edge {
@@ -266,11 +569,11 @@
 }
 
 .sheet-panel {
-  max-height: 92%;
+  max-height: min(92dvh, 92%);
   border-start-start-radius: var(--radius-sheet);
   border-start-end-radius: var(--radius-sheet);
   background: var(--bg-grouped);
-  box-shadow: 0 -18px 48px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 -18px 48px rgba(0, 0, 0, 0.24);
   will-change: transform;
   transition: none;
 }
@@ -284,7 +587,22 @@
   bottom: max(0.75rem, env(safe-area-inset-bottom));
 }
 .pt-safe {
-  padding-top: max(0.25rem, env(safe-area-inset-top));
+  padding-top: max(0.35rem, env(safe-area-inset-top));
+}
+.pb-safe {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+.sheet-scroll-safe {
+  padding-bottom: calc(2.5rem + env(safe-area-inset-bottom));
+}
+
+/* Hide horizontal scrollbar on touch carousels while keeping smooth scroll */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 .row-press:active {
@@ -294,11 +612,13 @@
 @media (prefers-reduced-motion: reduce) {
   .screen-content button,
   .screen-content [role="button"],
-  .tab-bar button {
+  .tab-bar button,
+  .apple-wallet-card {
     transition: none;
   }
   .sheet-panel,
   .glass,
+  .surface-card,
   .scroll-edge {
     transition: none;
     animation: none;
@@ -308,8 +628,9 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .glass {
-    background: color-mix(in srgb, var(--bg-grouped) 94%, transparent);
+  .glass,
+  .surface-card {
+    background: color-mix(in srgb, var(--bg-grouped-cell) 96%, transparent);
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
   }

@@ -27,6 +27,7 @@ import { toast } from "sonner";
 import { PillButton } from "@/components/finance/ui";
 import { useI18n } from "@/lib/finance/i18n";
 import { CURRENCIES, type Currency } from "@/lib/finance/types";
+import { copyTextSafe } from "@/lib/mobile-safe";
 import {
   adminCreateUserAccount,
   adminDeleteUserAccount,
@@ -119,6 +120,12 @@ export function SuperAdminScreen() {
     password: string;
     displayName: string;
   } | null>(null);
+  const [adminDialog, setAdminDialog] = useState<
+    | null
+    | { kind: "reject-payment"; req: PaymentRequestItem; note: string }
+    | { kind: "reset-password"; user: AdminManagedUser; nextPass: string }
+    | { kind: "delete-user"; user: AdminManagedUser }
+  >(null);
 
   useEffect(() => {
     const next: Record<PlanCode, string> = {
@@ -239,10 +246,10 @@ export function SuperAdminScreen() {
 
   const copyValue = async (val: string, label: string) => {
     if (!val) return;
-    try {
-      await navigator.clipboard.writeText(val);
+    const copied = await copyTextSafe(val);
+    if (copied) {
       toast.success(isAr ? `تم نسخ ${label}` : `${label} copied`);
-    } catch {
+    } else {
       toast.info(val);
     }
   };
@@ -268,22 +275,24 @@ export function SuperAdminScreen() {
     }
   };
 
-  const handleReviewPayment = async (req: PaymentRequestItem, decision: "approved" | "rejected") => {
-    let adminNote: string | undefined;
-    if (decision === "rejected" && typeof window !== "undefined") {
-      const entered = window.prompt(
-        isAr
-          ? "اكتب سبب رفض الطلب ليظهر للمشترك (اختياري):"
-          : "Optional reason for rejection (visible to subscriber):",
-        "",
-      );
-      if (entered === null) return;
-      adminNote = entered.trim() || undefined;
+  const handleReviewPayment = async (
+    req: PaymentRequestItem,
+    decision: "approved" | "rejected",
+    adminNote?: string,
+  ) => {
+    if (decision === "rejected" && adminNote === undefined) {
+      setAdminDialog({ kind: "reject-payment", req, note: "" });
+      return;
     }
 
     setBusy(true);
     try {
-      await adminReviewPaymentRequest({ requestId: req.id, decision, adminNote });
+      await adminReviewPaymentRequest({
+        requestId: req.id,
+        decision,
+        adminNote: adminNote?.trim() || undefined,
+      });
+      setAdminDialog(null);
       await load();
       await refreshWorkspaces();
       toast.success(
@@ -424,24 +433,31 @@ export function SuperAdminScreen() {
     await copyValue(text, isAr ? "بيانات الدخول" : "Credentials");
   };
 
-  const handleResetUserPassword = async (u: AdminManagedUser) => {
-    const generated = generateStrongPassword();
-    const nextPass =
-      typeof window !== "undefined"
-        ? window.prompt(
-            isAr
-              ? `أدخل كلمة المرور الجديدة للمشترك (${u.email}):`
-              : `Enter new password for ${u.email}:`,
-            generated,
-          )
-        : generated;
-    if (!nextPass || nextPass.trim().length < 6) return;
+  const handleResetUserPassword = (u: AdminManagedUser) => {
+    setAdminDialog({
+      kind: "reset-password",
+      user: u,
+      nextPass: generateStrongPassword(),
+    });
+  };
+
+  const confirmResetUserPassword = async () => {
+    if (!adminDialog || adminDialog.kind !== "reset-password") return;
+    const { user: u, nextPass } = adminDialog;
+    if (!nextPass || nextPass.trim().length < 6) {
+      toast.error(isAr ? "كلمة المرور 6 أحرف على الأقل" : "At least 6 characters");
+      return;
+    }
+    setBusy(true);
     try {
       await adminUpdateUserAccount({ userId: u.id, password: nextPass.trim() });
       setCreatedCreds({ email: u.email, password: nextPass.trim(), displayName: u.displayName });
+      setAdminDialog(null);
       toast.success(isAr ? "تم تحديث كلمة المرور" : "Password updated");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -463,21 +479,22 @@ export function SuperAdminScreen() {
     }
   };
 
-  const handleDeleteUser = async (u: AdminManagedUser) => {
-    if (
-      typeof window !== "undefined" &&
-      !window.confirm(
-        isAr ? `هل أنت متأكد من حذف الحساب ${u.email} نهائياً؟` : `Permanently delete ${u.email}?`,
-      )
-    ) {
-      return;
-    }
+  const handleDeleteUser = (u: AdminManagedUser) => {
+    setAdminDialog({ kind: "delete-user", user: u });
+  };
+
+  const confirmDeleteUser = async () => {
+    if (!adminDialog || adminDialog.kind !== "delete-user") return;
+    setBusy(true);
     try {
-      await adminDeleteUserAccount(u.id);
+      await adminDeleteUserAccount(adminDialog.user.id);
+      setAdminDialog(null);
       await load();
       toast.success(isAr ? "تم حذف الحساب" : "Account deleted");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1341,7 +1358,7 @@ export function SuperAdminScreen() {
                 <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     type="button"
-                    onClick={() => void handleResetUserPassword(u)}
+                    onClick={() => handleResetUserPassword(u)}
                     className="h-8 px-2.5 rounded-lg bg-[var(--fill)] text-[11px] font-semibold flex items-center gap-1"
                   >
                     <KeyRound className="w-3 h-3 text-[var(--tint)]" />
@@ -1363,7 +1380,7 @@ export function SuperAdminScreen() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void handleDeleteUser(u)}
+                        onClick={() => handleDeleteUser(u)}
                         className="h-8 px-2 rounded-lg text-[var(--red)] hover:bg-[var(--red-soft)]"
                         aria-label={isAr ? "حذف الحساب" : "Delete user"}
                       >
@@ -1374,6 +1391,98 @@ export function SuperAdminScreen() {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Mobile-Safe Touch Action Modal (replaces native browser prompt/confirm) */}
+      {adminDialog && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-4 pb-safe"
+          onClick={() => !busy && setAdminDialog(null)}
+        >
+          <div
+            className="w-full max-w-md bg-[var(--surface)] rounded-3xl border border-[var(--sep)] p-5 space-y-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {adminDialog.kind === "reject-payment" && (
+              <>
+                <h3 className="text-[16px] font-bold">
+                  {isAr ? "رفض طلب التفعيل" : "Reject Payment Request"}
+                </h3>
+                <p className="text-[12px] text-[var(--label-2)]">
+                  {isAr
+                    ? "اكتب سبب الرفض ليظهر للمشترك (اختياري) ليتمكن من رفع إيصال صحيح:"
+                    : "Optional reason visible to the subscriber:"}
+                </p>
+                <input
+                  type="text"
+                  value={adminDialog.note}
+                  onChange={(e) => setAdminDialog({ ...adminDialog, note: e.target.value })}
+                  placeholder={isAr ? "مثال: صورة الإيصال غير واضحة" : "e.g. Unclear transfer screenshot"}
+                  className="w-full h-11 px-3.5 rounded-xl bg-[var(--fill)] text-[14px]"
+                />
+                <div className="flex items-center gap-2 justify-end">
+                  <PillButton tone="gray" disabled={busy} onClick={() => setAdminDialog(null)}>
+                    {isAr ? "إلغاء" : "Cancel"}
+                  </PillButton>
+                  <PillButton
+                    tone="danger"
+                    disabled={busy}
+                    onClick={() => void handleReviewPayment(adminDialog.req, "rejected", adminDialog.note)}
+                  >
+                    {isAr ? "تأكيد الرفض" : "Reject"}
+                  </PillButton>
+                </div>
+              </>
+            )}
+
+            {adminDialog.kind === "reset-password" && (
+              <>
+                <h3 className="text-[16px] font-bold">
+                  {isAr ? "تعيين كلمة مرور جديدة" : "Set New Password"}
+                </h3>
+                <p className="text-[12px] text-[var(--label-2)]" dir="ltr">
+                  {adminDialog.user.email}
+                </p>
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={adminDialog.nextPass}
+                  onChange={(e) => setAdminDialog({ ...adminDialog, nextPass: e.target.value })}
+                  className="w-full h-11 px-3.5 rounded-xl bg-[var(--fill)] text-[14px] font-mono"
+                />
+                <div className="flex items-center gap-2 justify-end">
+                  <PillButton tone="gray" disabled={busy} onClick={() => setAdminDialog(null)}>
+                    {isAr ? "إلغاء" : "Cancel"}
+                  </PillButton>
+                  <PillButton disabled={busy} onClick={() => void confirmResetUserPassword()}>
+                    {isAr ? "حفظ كلمة المرور" : "Save Password"}
+                  </PillButton>
+                </div>
+              </>
+            )}
+
+            {adminDialog.kind === "delete-user" && (
+              <>
+                <h3 className="text-[16px] font-bold text-[var(--red)]">
+                  {isAr ? "تأكيد حذف الحساب نهائياً" : "Confirm Permanent Deletion"}
+                </h3>
+                <p className="text-[13px] text-[var(--label-2)]">
+                  {isAr
+                    ? `هل أنت متأكد من حذف الحساب (${adminDialog.user.email}) نهائياً؟`
+                    : `Permanently delete account (${adminDialog.user.email})?`}
+                </p>
+                <div className="flex items-center gap-2 justify-end">
+                  <PillButton tone="gray" disabled={busy} onClick={() => setAdminDialog(null)}>
+                    {isAr ? "إلغاء" : "Cancel"}
+                  </PillButton>
+                  <PillButton tone="danger" disabled={busy} onClick={() => void confirmDeleteUser()}>
+                    {isAr ? "حذف نهائياً" : "Delete"}
+                  </PillButton>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

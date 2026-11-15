@@ -802,3 +802,48 @@ test("TenantSettingsScreen Billing tab shows 4 packages and transfer screenshot 
   });
 });
 
+test("HomeScreen renders Apple Wallet cards with direct rename buttons and /appledesign1 Design Studio", async () => {
+  const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
+  const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
+  const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
+
+  updateUiPrefs({
+    language: "ar",
+    numeralStyle: "latn",
+    analyticsEnabled: true,
+    appleTheme: "liquid-glass",
+    colorMode: "system",
+    cardsSectionTitle: "",
+  });
+  win.localStorage.setItem("mizan.tenant.t-personal-1.v1", JSON.stringify(seedData()));
+
+  render(
+    React.createElement(MizanRoot, {
+      skipSplash: true,
+      initialSession: makeTestSession({ isSuperAdmin: false }),
+    }),
+  );
+
+  // Direct rename button right on the Cash card on HomeScreen
+  const editCashBtn = await screen.findByRole("button", { name: /تعديل اسم وتصميم كاش/ });
+  fireEvent.click(editCashBtn);
+
+  const nameInput = await screen.findByPlaceholderText(/بطاقة البنك الأهلي/);
+  fireEvent.change(nameInput, { target: { value: "بطاقة البنك الأهلي المصري" } });
+  fireEvent.click(screen.getByRole("button", { name: "حفظ" }));
+
+  await waitFor(() => {
+    assert.ok(screen.getByText("بطاقة البنك الأهلي المصري"));
+  });
+
+  // Open /appledesign1 Design Studio and switch to Titanium Pro
+  const openStudioBtn = screen.getByRole("button", { name: /تصميمات Apple وتعديل البطاقات/ });
+  fireEvent.click(openStudioBtn);
+
+  const titaniumThemeBtn = await screen.findByRole("button", { name: /تيتانيوم برو الفاخر/ });
+  fireEvent.click(titaniumThemeBtn);
+
+  assert.equal(win.document.documentElement.dataset.appleTheme, "titanium-pro");
+});
+
+

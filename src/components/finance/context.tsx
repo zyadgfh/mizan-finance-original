@@ -44,7 +44,8 @@ export type SheetState =
   | { kind: "wallet"; id?: string }
   | { kind: "search" }
   | { kind: "csv-import" }
-  | { kind: "workspace-switcher" };
+  | { kind: "workspace-switcher" }
+  | { kind: "design" };
 
 export type MizanUI = {
   tab: Tab;

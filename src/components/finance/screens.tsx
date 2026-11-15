@@ -3,12 +3,16 @@ import {
   Cloud,
   ChevronLeft,
   ChevronRight,
+  CreditCard,
   Crown,
   Eye,
   EyeOff,
   FileSpreadsheet,
   Globe,
   LogOut,
+  Palette,
+  Pencil,
+  Plus,
   Search,
   Shield,
   Sparkles,
@@ -16,6 +20,7 @@ import {
 } from "lucide-react";
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { AppleWalletCard } from "@/components/finance/apple-cards";
 import { IconTile } from "@/components/finance/icons";
 import { useMizan, type DebtTabFilter } from "@/components/finance/context";
 import { AnimatedBar } from "@/components/finance/gsap-motion";
@@ -73,7 +78,7 @@ import {
   whatsappHref,
 } from "@/lib/finance/logic";
 import { getLatestPerfSample } from "@/lib/finance/perf-metrics";
-import { updateUiPrefs } from "@/lib/finance/prefs";
+import { APPLE_THEMES, updateUiPrefs, useUiPrefs } from "@/lib/finance/prefs";
 import { exportMonthlyReportPdf } from "@/lib/finance/report-export";
 import { updateSecuritySettings, useSecuritySettings } from "@/lib/finance/security";
 import { exportCsv, exportData, exportDataAsync, importDataAsync, pickFinanceData, useFinance } from "@/lib/finance/store";
@@ -123,6 +128,7 @@ export function HomeScreen() {
     setTab,
   } = useMizan();
   const data = useFinance();
+  const uiPrefs = useUiPrefs();
   const { hideAmounts } = useSecuritySettings();
   const { lang, numeralStyle, analyticsEnabled, t, catName } = useI18n();
   const confirmRecurring = useFinance((s) => s.confirmRecurring);
@@ -184,9 +190,20 @@ export function HomeScreen() {
   return (
     <div>
       <div data-stagger className="px-4">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <h1 className="text-largetitle font-bold tracking-title">{t("tabHome")}</h1>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => openSheet({ kind: "design" })}
+              aria-label={lang === "en" ? "Apple Themes & Card Names" : "تصميمات Apple وتعديل البطاقات"}
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-pill bg-[var(--tint-soft)] px-3 text-caption font-semibold text-tint active:opacity-80"
+            >
+              <Palette size={16} strokeWidth={2.1} />
+              <span className="hidden xs:inline sm:inline">
+                {lang === "en" ? "Themes" : "التصميمات"}
+              </span>
+            </button>
             <button
               type="button"
               onClick={() => openSheet({ kind: "search" })}
@@ -236,20 +253,44 @@ export function HomeScreen() {
         </Section>
       ) : null}
 
-      <div data-stagger className="mt-5 flex gap-2.5 overflow-x-auto px-4 pb-1 lg:grid lg:grid-cols-4 lg:overflow-visible">
-        {data.wallets.map((w) => (
-          <button
-            key={w.id}
-            type="button"
-            onClick={openWallets}
-            className="surface-card min-w-32 shrink-0 rounded-cell px-3.5 py-2.5 text-start lg:min-w-0"
-          >
-            <span className="block text-caption text-label-2">{w.name}</span>
-            <span className="mt-1 block text-sub font-semibold">
-              <Amount value={walletBalance(w.id, data)} currency={data.currency} sign="auto" />
-            </span>
-          </button>
-        ))}
+      <div data-stagger className="mt-5">
+        <div className="mb-2 flex items-center justify-between gap-2 px-5">
+          <span className="text-foot font-semibold text-label-2">
+            {uiPrefs.cardsSectionTitle.trim() ||
+              (lang === "en" ? "My Cards & Wallets" : "بطاقاتي ومحافظي")}
+          </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => openSheet({ kind: "design" })}
+              className="inline-flex min-h-8 items-center gap-1 rounded-pill bg-fill px-2.5 py-1 text-[11px] font-semibold text-tint active:opacity-80"
+            >
+              <Pencil size={11} />
+              <span>{lang === "en" ? "Edit Names" : "تعديل الأسماء"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => openSheet({ kind: "wallet" })}
+              className="inline-flex min-h-8 items-center gap-1 rounded-pill bg-[var(--tint-soft)] px-2.5 py-1 text-[11px] font-semibold text-tint active:opacity-80"
+            >
+              <Plus size={12} />
+              <span>{lang === "en" ? "Card" : "بطاقة"}</span>
+            </button>
+          </div>
+        </div>
+        <div className="no-scrollbar flex gap-2.5 overflow-x-auto px-4 pb-1 lg:grid lg:grid-cols-4 lg:overflow-visible">
+          {data.wallets.map((w) => (
+            <AppleWalletCard
+              key={w.id}
+              wallet={w}
+              balance={walletBalance(w.id, data)}
+              currency={data.currency}
+              compact
+              onOpen={openWallets}
+              onEdit={() => openSheet({ kind: "wallet", id: w.id })}
+            />
+          ))}
+        </div>
       </div>
 
       <div data-stagger className="mt-3 flex gap-2 overflow-x-auto px-4 pb-1">
@@ -1314,6 +1355,9 @@ export function MoreScreen() {
   const [ccText, setCcText] = useState(phoneCountryCode ?? "");
   const [encPass, setEncPass] = useState("");
   const [showEncInput, setShowEncInput] = useState(false);
+  const [pendingImportJson, setPendingImportJson] = useState<string | null>(null);
+  const [importPass, setImportPass] = useState("");
+  const uiPrefs = useUiPrefs();
   const [errorLogs, setErrorLogs] = useState(() => loadErrorLogs());
   const latestPerf = useMemo(() => getLatestPerfSample(), []);
 
@@ -1390,6 +1434,49 @@ export function MoreScreen() {
           </Group>
         </Section>
       ) : null}
+
+      <Section
+        title={lang === "en" ? "Apple Designs & Cards (/appledesign1)" : "تصميمات Apple والبطاقات (/appledesign1)"}
+      >
+        <Group sep="icon">
+          <Row
+            leading={
+              <span
+                className="icon-tile"
+                style={{
+                  background:
+                    APPLE_THEMES.find((th) => th.id === uiPrefs.appleTheme)?.swatch ?? "var(--tint)",
+                }}
+              >
+                <Palette size={16} />
+              </span>
+            }
+            title={lang === "en" ? "Apple Design Studio" : "استوديو تصميمات Apple"}
+            sub={
+              lang === "en"
+                ? `Current: ${APPLE_THEMES.find((th) => th.id === uiPrefs.appleTheme)?.nameEn ?? "Liquid Glass"} · 6 themes`
+                : `الحالي: ${APPLE_THEMES.find((th) => th.id === uiPrefs.appleTheme)?.nameAr ?? "زجاج Apple السائل"} · 6 تصميمات`
+            }
+            chevron
+            onClick={() => openSheet({ kind: "design" })}
+          />
+          <Row
+            leading={
+              <span className="icon-tile" style={{ background: "var(--green)" }}>
+                <CreditCard size={16} />
+              </span>
+            }
+            title={lang === "en" ? "Edit Card & Wallet Names" : "تعديل أسماء وتصميمات البطاقات والمحافظ"}
+            sub={
+              lang === "en"
+                ? `${data.wallets.length} cards & wallets · Apple Wallet styles`
+                : `${formatNumber(data.wallets.length, numeralStyle, lang)} بطاقات ومحافظ · ألوان وأسماء مخصصة`
+            }
+            chevron
+            onClick={openWallets}
+          />
+        </Group>
+      </Section>
 
       <Section title={t("languageSection")} footer={t("languageFooter")}>
         <Group sep="icon">
@@ -1764,43 +1851,86 @@ export function MoreScreen() {
               toast(lang === "en" ? "Report ready for print / PDF" : "جُهّز التقرير للطباعة / PDF");
             }}
           />
-          <Row
-            title={lang === "en" ? "Import JSON Backup" : "استيراد ملف"}
-            sub={lang === "en" ? "Supports plain and encrypted JSON" : "يدعم JSON العادي والمشفّر"}
-            chevron
-            onClick={() => document.getElementById("mizan-import")?.click()}
-          />
-        </Group>
-        <input
-          id="mizan-import"
-          type="file"
-          accept="application/json,.json"
-          className="hidden"
-          onChange={async (e) => {
-            const file = e.target.files?.[0];
-            e.target.value = "";
-            if (!file) return;
-            const text = await file.text();
-            try {
-              await importDataAsync(text);
-              toast(lang === "en" ? "Import complete" : "تم الاستيراد");
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : "";
-              if (msg.includes("مشفّرة") || msg.includes("كلمة مرور")) {
-                const pass = window.prompt(lang === "en" ? "Enter backup passphrase:" : "أدخل كلمة مرور النسخة المشفّرة:");
-                if (!pass) return;
+          <label className="row-press relative flex min-h-11 w-full cursor-pointer items-center gap-3 overflow-hidden px-4 py-2 text-start">
+            <span className="min-w-0 flex-1 text-start">
+              <span className="block truncate text-body">
+                {lang === "en" ? "Import JSON Backup" : "استيراد ملف"}
+              </span>
+              <span className="block truncate text-foot text-label-2">
+                {lang === "en" ? "Supports plain and encrypted JSON" : "يدعم JSON العادي والمشفّر"}
+              </span>
+            </span>
+            <input
+              id="mizan-import"
+              type="file"
+              accept="application/json,.json,text/plain"
+              className="sr-only"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (!file) return;
+                const text = await file.text();
                 try {
-                  await importDataAsync(text, pass);
-                  toast(lang === "en" ? "Decrypted and imported" : "تم فك التشفير والاستيراد");
-                } catch {
-                  toast(lang === "en" ? "Incorrect passphrase or corrupted file" : "كلمة المرور غير صحيحة أو الملف تالف");
+                  await importDataAsync(text);
+                  setPendingImportJson(null);
+                  toast(lang === "en" ? "Import complete" : "تم الاستيراد");
+                } catch (err) {
+                  const msg = err instanceof Error ? err.message : "";
+                  if (msg.includes("مشفّرة") || msg.includes("كلمة مرور")) {
+                    setPendingImportJson(text);
+                    setImportPass("");
+                    toast(
+                      lang === "en"
+                        ? "Encrypted backup — enter passphrase below"
+                        : "نسخة مشفّرة — أدخل كلمة المرور بالأسفل",
+                    );
+                  } else {
+                    toast(msg || (lang === "en" ? "Invalid file format" : "الملف غير مفهوم"));
+                  }
                 }
-              } else {
-                toast(msg || (lang === "en" ? "Invalid file format" : "الملف غير مفهوم"));
-              }
-            }
-          }}
-        />
+              }}
+            />
+          </label>
+          {pendingImportJson ? (
+            <div className="flex flex-wrap items-center gap-2 px-4 py-3">
+              <input
+                type="password"
+                className="field min-w-[180px] flex-1 rounded-inner bg-fill px-3"
+                value={importPass}
+                placeholder={lang === "en" ? "Enter backup passphrase" : "أدخل كلمة مرور النسخة المشفّرة"}
+                onChange={(e) => setImportPass(e.target.value)}
+              />
+              <PillButton
+                onClick={async () => {
+                  if (!importPass.trim()) return;
+                  try {
+                    await importDataAsync(pendingImportJson, importPass.trim());
+                    setPendingImportJson(null);
+                    setImportPass("");
+                    toast(lang === "en" ? "Decrypted and imported" : "تم فك التشفير والاستيراد");
+                  } catch {
+                    toast(
+                      lang === "en"
+                        ? "Incorrect passphrase or corrupted file"
+                        : "كلمة المرور غير صحيحة أو الملف تالف",
+                    );
+                  }
+                }}
+              >
+                {lang === "en" ? "Decrypt & Import" : "فك التشفير والاستيراد"}
+              </PillButton>
+              <PillButton
+                tone="gray"
+                onClick={() => {
+                  setPendingImportJson(null);
+                  setImportPass("");
+                }}
+              >
+                {t("cancel")}
+              </PillButton>
+            </div>
+          ) : null}
+        </Group>
       </Section>
 
       <Section title={t("perfAndErrors")}>
