@@ -1,5 +1,5 @@
-import { currentMonth, dateInMonth, shiftISO, todayISO } from "./logic";
-import type { Data, Tx } from "./types";
+import { currentMonth, dateInMonth, shiftISO, todayISO } from "./logic.ts";
+import type { Data, Tx } from "./types.ts";
 
 function tx(
   id: string,

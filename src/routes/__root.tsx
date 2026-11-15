@@ -34,6 +34,7 @@ export const Route = createRootRoute({
       { rel: "manifest", href: "/__grok/manifest.webmanifest" },
       { rel: "apple-touch-icon", href: "/__grok/icon-180.png" },
     ],
+    scripts: [{ src: "https://accounts.google.com/gsi/client", async: true }],
   }),
   component: () => (
     <html lang="ar" dir="rtl" suppressHydrationWarning>

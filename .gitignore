@@ -1,4 +1,10 @@
 # Local-only generated dependencies and machine settings
 node_modules/
+native-dist/
+dist/
+.output/
+.nitro/
+.vercel/
 android/local.properties
+*.apk
 .DS_Store

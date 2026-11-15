@@ -2,10 +2,11 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import { ChevronLeft } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { money } from "@/lib/finance/logic";
 import type { Currency } from "@/lib/finance/types";
+import { prefersReducedMotion } from "./motion-utils";
 
 gsap.registerPlugin(useGSAP);
 
@@ -43,8 +44,8 @@ export function Section({
   className?: string;
 }) {
   return (
-    <section className={cn("mt-6", className)}>
-      {title ? <h2 className="px-8 pb-2 text-foot text-label-2">{title}</h2> : null}
+    <section data-stagger className={cn("mt-6", className)}>
+      {title ? <h2 className="px-8 pb-2 text-foot font-medium text-label-2">{title}</h2> : null}
       {children}
       {footer ? <p className="px-8 pt-2 text-foot text-label-2">{footer}</p> : null}
     </section>
@@ -60,7 +61,7 @@ export function Group({
 }) {
   const items = (Array.isArray(children) ? children : [children]).filter(Boolean);
   return (
-    <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+    <div className="surface-card mx-4 overflow-hidden rounded-cell">
       {items.map((child, i) => (
         <div key={i}>
           {i > 0 && sep !== "none" ? <div className={sep === "icon" ? "row-sep-icon" : "row-sep"} /> : null}
@@ -95,7 +96,11 @@ export function Row({
         <span className={cn("block truncate text-body", destructive && "text-expense")}>{title}</span>
         {sub ? <span className="block truncate text-foot text-label-2">{sub}</span> : null}
       </span>
-      {trailing ? <span className="flex min-w-0 max-w-[48%] shrink-0 items-center justify-end gap-1 overflow-hidden">{trailing}</span> : null}
+      {trailing ? (
+        <span className="flex min-w-0 max-w-[48%] shrink-0 items-center justify-end gap-1 overflow-hidden">
+          {trailing}
+        </span>
+      ) : null}
       {chevron ? <ChevronLeft className="shrink-0 text-label-3" size={18} strokeWidth={2} aria-hidden /> : null}
     </>
   );
@@ -120,7 +125,7 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div className="px-8 py-14 text-center">
+    <div data-stagger className="px-8 py-14 text-center">
       <h3 className="text-title3 font-semibold">{title}</h3>
       <p className="mx-auto mt-2 max-w-xs text-sub text-label-2">{body}</p>
       {action ? <div className="mt-5 flex justify-center">{action}</div> : null}
@@ -142,7 +147,7 @@ export function PillButton({
   disabled?: boolean;
 }) {
   const tones = {
-    tint: "bg-tint text-on-tint",
+    tint: "bg-tint text-on-tint shadow-sm",
     gray: "bg-fill text-tint",
     plain: "text-tint",
     danger: "text-expense",
@@ -178,23 +183,70 @@ export function Segment<T extends string>({
   onChange: (v: T) => void;
   options: { id: T; label: string }[];
 }) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const pillRef = useRef<HTMLDivElement>(null);
+  const btnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const mounted = useRef(false);
+
+  const positionPill = (animate: boolean) => {
+    const wrap = wrapRef.current;
+    const pill = pillRef.current;
+    const btn = btnRefs.current[value];
+    if (!wrap || !pill || !btn) return;
+    const wrapRect = wrap.getBoundingClientRect();
+    const btnRect = btn.getBoundingClientRect();
+    const x = btnRect.left - wrapRect.left;
+    const width = btnRect.width;
+    if (width <= 0) return;
+
+    if (!animate || prefersReducedMotion()) {
+      gsap.set(pill, { x, width, opacity: 1 });
+    } else {
+      gsap.to(pill, { x, width, opacity: 1, duration: 0.26, ease: "power3.out", overwrite: "auto" });
+    }
+  };
+
+  useLayoutEffect(() => {
+    positionPill(mounted.current);
+    mounted.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, options.length]);
+
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => positionPill(false));
+    ro.observe(wrap);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
   return (
     <div
-      className={cn("grid rounded-cell bg-fill p-0.5", segmentCols[options.length] ?? "grid-cols-2")}
+      ref={wrapRef}
+      className={cn("relative grid rounded-cell bg-fill p-1", segmentCols[options.length] ?? "grid-cols-2")}
       role="tablist"
     >
+      <div
+        ref={pillRef}
+        aria-hidden
+        className="pointer-events-none absolute inset-y-1 left-0 rounded-inner bg-cell opacity-0 shadow-sm"
+      />
       {options.map((o) => {
         const on = o.id === value;
         return (
           <button
             key={o.id}
+            ref={(el) => {
+              btnRefs.current[o.id] = el;
+            }}
             type="button"
             role="tab"
             aria-selected={on}
             onClick={() => onChange(o.id)}
             className={cn(
-              "min-h-11 rounded-lg px-2 text-sub font-semibold",
-              on ? "bg-cell text-label shadow-sm" : "text-label-2",
+              "relative z-10 min-h-11 rounded-inner px-2 text-sub font-semibold",
+              on ? "text-label" : "text-label-2",
             )}
           >
             {o.label}
@@ -220,7 +272,7 @@ export function SearchField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="field rounded-cell bg-fill px-3"
+        className="field rounded-cell bg-fill px-3.5"
         aria-label={placeholder}
       />
     </div>
@@ -246,6 +298,7 @@ export function Sheet({
   const drag = useRef(false);
   const dyRef = useRef(0);
   const panel = useRef<HTMLDivElement>(null);
+  const overlay = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const id = requestAnimationFrame(() => setShown(true));
@@ -255,30 +308,55 @@ export function Sheet({
   const { contextSafe } = useGSAP(
     () => {
       if (!panel.current || !shown) return;
-      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (reduce) {
+      if (prefersReducedMotion()) {
         gsap.set(panel.current, { y: 0 });
+        if (overlay.current) gsap.set(overlay.current, { opacity: 1 });
         return;
       }
-      gsap.fromTo(panel.current, { yPercent: 100 }, { yPercent: 0, duration: 0.42, ease: "power3.out", overwrite: "auto" });
+      gsap.fromTo(
+        panel.current,
+        { yPercent: 100 },
+        { yPercent: 0, duration: 0.38, ease: "power3.out", overwrite: "auto" },
+      );
+      if (overlay.current) {
+        gsap.fromTo(overlay.current, { opacity: 0 }, { opacity: 1, duration: 0.28, ease: "power2.out" });
+      }
     },
     { scope: panel, dependencies: [shown], revertOnUpdate: true },
   );
 
   const close = contextSafe(() => {
-    if (!panel.current || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    if (!panel.current || prefersReducedMotion()) {
       onClose();
       return;
     }
-    gsap.to(panel.current, { yPercent: 100, duration: 0.28, ease: "power2.in", overwrite: "auto", onComplete: onClose });
+    if (overlay.current) {
+      gsap.to(overlay.current, { opacity: 0, duration: 0.22, ease: "power2.in" });
+    }
+    gsap.to(panel.current, {
+      yPercent: 100,
+      duration: 0.25,
+      ease: "power2.in",
+      overwrite: "auto",
+      onComplete: onClose,
+    });
   });
 
   const updateDrag = contextSafe((next: number) => {
     if (panel.current) gsap.set(panel.current, { y: next });
+    if (overlay.current) {
+      const ratio = Math.max(0.15, 1 - next / 420);
+      gsap.set(overlay.current, { opacity: ratio });
+    }
   });
 
   const settleDrag = contextSafe(() => {
-    if (panel.current) gsap.to(panel.current, { y: 0, duration: 0.42, ease: "power3.out", overwrite: "auto" });
+    if (panel.current) {
+      gsap.to(panel.current, { y: 0, duration: 0.36, ease: "power3.out", overwrite: "auto" });
+    }
+    if (overlay.current) {
+      gsap.to(overlay.current, { opacity: 1, duration: 0.25, ease: "power2.out" });
+    }
   });
 
   return (
@@ -289,8 +367,8 @@ export function Sheet({
       }}
     >
       <Dialog.Portal container={container ?? undefined}>
-        <Dialog.Overlay className="absolute inset-0 z-40 bg-black/40" />
-          <Dialog.Content
+        <Dialog.Overlay ref={overlay} className="absolute inset-0 z-40 bg-black/40" />
+        <Dialog.Content
           ref={panel}
           className="sheet-panel absolute inset-x-0 bottom-0 z-50 flex flex-col outline-none"
           onOpenAutoFocus={(e) => e.preventDefault()}

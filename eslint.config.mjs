@@ -10,6 +10,8 @@ export default tseslint.config(
   {
     ignores: [
       "dist/**",
+      "native-dist/**",
+      "android/**",
       ".output/**",
       ".vercel/**",
       ".nitro/**",

@@ -1,7 +1,7 @@
 import { format, isToday, isYesterday, parseISO } from "date-fns";
 import { arEG } from "date-fns/locale";
-import type { Currency, Data, Debt, GoalMove, Payment, Recurring, Tx, Wallet } from "./types";
-import { CURRENCIES } from "./types";
+import type { Currency, Data, Debt, GoalMove, Payment, Recurring, Tx, Wallet } from "./types.ts";
+import { CURRENCIES } from "./types.ts";
 
 export function round2(n: number) {
   return Math.round(n * 100) / 100;
@@ -50,8 +50,20 @@ const SYMBOLS: Record<Currency, string> = {
   EUR: "€",
 };
 
+const COUNTRY_CODES: Record<Currency, string> = {
+  EGP: "20",
+  SAR: "966",
+  AED: "971",
+  USD: "1",
+  EUR: "49",
+};
+
 export function currencySymbol(c: Currency) {
   return SYMBOLS[c];
+}
+
+export function defaultCountryCodeForCurrency(c: Currency): string {
+  return COUNTRY_CODES[c] ?? "20";
 }
 
 export function formatNumber(n: number) {
@@ -81,6 +93,16 @@ export function shortDate(date: string) {
   const d = parseISO(date);
   const sameYear = d.getFullYear() === new Date().getFullYear();
   return format(d, sameYear ? "d MMMM" : "d MMMM yyyy", { locale: arEG });
+}
+
+export function normalizeSearch(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670]/g, "")
+    .replace(/[أإآ]/g, "ا")
+    .replace(/ى/g, "ي")
+    .replace(/ة/g, "ه")
+    .trim();
 }
 
 export function paidOf(debtId: string, payments: Payment[]) {
@@ -283,12 +305,23 @@ export function pendingRecurring(list: Recurring[], month: string) {
   return list.filter((r) => r.active && r.lastMonth !== month);
 }
 
-export function whatsappHref(phone: string, text: string) {
-  let d = phone.replace(/\D/g, "");
+export function whatsappHref(phone: string, text: string, defaultCountryCode = "20") {
+  const trimmed = phone.trim();
+  const cc = defaultCountryCode.replace(/\D/g, "") || "20";
+  let d = trimmed.replace(/\D/g, "");
   if (!d) return "";
-  if (d.startsWith("00")) d = d.slice(2);
-  if (d.startsWith("0")) d = `20${d.slice(1)}`;
-  else if (!d.startsWith("20") && d.length === 10) d = `20${d}`;
+  if (trimmed.startsWith("+")) {
+    return `https://wa.me/${d}?text=${encodeURIComponent(text)}`;
+  }
+  if (d.startsWith("00")) {
+    d = d.slice(2);
+    return d ? `https://wa.me/${d}?text=${encodeURIComponent(text)}` : "";
+  }
+  if (d.startsWith("0")) {
+    d = `${cc}${d.slice(1)}`;
+  } else if (!d.startsWith(cc) && d.length <= 10) {
+    d = `${cc}${d}`;
+  }
   return `https://wa.me/${d}?text=${encodeURIComponent(text)}`;
 }
 

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { IconTile } from "@/components/finance/icons";
 import { PillButton, Section, Segment, Sheet } from "@/components/finance/ui";
 import { useMizan } from "@/components/finance/context";
+import { cn } from "@/lib/cn";
 import { paidOf, planInstallments, round2, todayISO } from "@/lib/finance/logic";
 import { compressReceipt, deleteReceipt, loadReceipt, saveReceipt } from "@/lib/finance/receipts";
 import { useFinance } from "@/lib/finance/store";
@@ -37,6 +38,8 @@ function AmountField({ value, onChange }: { value: string; onChange: (v: string)
 export function TxnForm({ id }: { id?: string }) {
   const { closeSheet, frame } = useMizan();
   const txns = useFinance((s) => s.txns);
+  const payments = useFinance((s) => s.payments);
+  const debts = useFinance((s) => s.debts);
   const categories = useFinance((s) => s.categories);
   const people = useFinance((s) => s.people);
   const wallets = useFinance((s) => s.wallets);
@@ -46,6 +49,8 @@ export function TxnForm({ id }: { id?: string }) {
   const restoreTxn = useFinance((s) => s.restoreTxn);
   const restorePayment = useFinance((s) => s.restorePayment);
   const existing = txns.find((t) => t.id === id);
+  const linkedPayment = existing ? payments.find((p) => p.txId === existing.id) : undefined;
+  const linkedDebt = linkedPayment ? debts.find((d) => d.id === linkedPayment.debtId) : undefined;
   const [draftId] = useState(() => existing?.id ?? crypto.randomUUID());
   const [kind, setKind] = useState<TxKind>(existing?.kind ?? "expense");
   const [amount, setAmount] = useState(existing ? String(existing.amount) : "");
@@ -87,6 +92,16 @@ export function TxnForm({ id }: { id?: string }) {
       toast("اكتب مبلغًا أكبر من صفر واختر فئة");
       return;
     }
+    if (linkedDebt && linkedPayment) {
+      const otherPaid = payments.reduce(
+        (s, p) => (p.debtId === linkedDebt.id && p.id !== linkedPayment.id ? s + p.amount : s),
+        0,
+      );
+      if (n > round2(linkedDebt.principal - otherPaid) + 0.009) {
+        toast("المبلغ أكبر من المتبقي على الدين");
+        return;
+      }
+    }
     const input = {
       kind,
       amount: n,
@@ -97,8 +112,15 @@ export function TxnForm({ id }: { id?: string }) {
       walletId,
       receiptId: receiptOn ? receiptKey : undefined,
     };
-    if (existing) updateTxn(existing.id, input);
-    else addTxn({ ...input, id: draftId });
+    if (existing) {
+      const ok = updateTxn(existing.id, input);
+      if (!ok) {
+        toast("تعذّر تحديث الحركة");
+        return;
+      }
+    } else {
+      addTxn({ ...input, id: draftId });
+    }
     if (!receiptOn) void deleteReceipt(receiptKey);
     toast(existing ? "تم تعديل الحركة" : kind === "income" ? "تم تسجيل الإيراد" : "تم تسجيل المصروف");
     closeSheet();
@@ -109,11 +131,14 @@ export function TxnForm({ id }: { id?: string }) {
     const snapshot = removeTxn(existing.id);
     closeSheet();
     if (!snapshot) return;
-    void deleteReceipt(snapshot.tx.id);
+    const receiptTimer = snapshot.tx.receiptId
+      ? window.setTimeout(() => void deleteReceipt(snapshot.tx.id), 9000)
+      : undefined;
     toast("تم حذف الحركة", {
       action: {
         label: "تراجع",
         onClick: () => {
+          if (receiptTimer !== undefined) window.clearTimeout(receiptTimer);
           restoreTxn(snapshot.tx);
           if (snapshot.payment) restorePayment(snapshot.payment);
         },
@@ -134,20 +159,26 @@ export function TxnForm({ id }: { id?: string }) {
       }
     >
       <AmountField value={amount} onChange={setAmount} />
-      <div className="px-4 pt-3">
-        <Segment
-          value={kind}
-          onChange={(k) => {
-            setKind(k);
-            const next = categories.find((c) => c.kind === k);
-            setCategoryId(next?.id ?? "");
-          }}
-          options={[
-            { id: "expense", label: "مصروف" },
-            { id: "income", label: "إيراد" },
-          ]}
-        />
-      </div>
+      {linkedPayment ? (
+        <p className="px-6 pt-2 text-center text-foot text-label-2">
+          هذه الحركة مرتبطة بسداد دين{linkedDebt ? ` (${linkedDebt.title})` : ""} — التعديل يحدّث الدفعة والمحفظة معاً.
+        </p>
+      ) : (
+        <div className="px-4 pt-3">
+          <Segment
+            value={kind}
+            onChange={(k) => {
+              setKind(k);
+              const next = categories.find((c) => c.kind === k);
+              setCategoryId(next?.id ?? "");
+            }}
+            options={[
+              { id: "expense", label: "مصروف" },
+              { id: "income", label: "إيراد" },
+            ]}
+          />
+        </div>
+      )}
       <div className="grid grid-cols-4 gap-1 px-3 pt-4">
         {cats.map((c) => {
           const on = c.id === categoryId;
@@ -167,7 +198,7 @@ export function TxnForm({ id }: { id?: string }) {
         })}
       </div>
       <Section title="التفاصيل" className="mt-4">
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">التاريخ</span>
             <input type="date" className="field" dir="ltr" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -182,18 +213,22 @@ export function TxnForm({ id }: { id?: string }) {
               onChange={(e) => setNote(e.target.value)}
             />
           </label>
-          <div className="row-sep" />
-          <label className="flex min-h-11 items-center gap-3 px-4">
-            <span className="w-16 shrink-0 text-body">شخص</span>
-            <select className="field" value={personId} onChange={(e) => setPersonId(e.target.value)}>
-              <option value="">بدون</option>
-              {people.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          {!linkedPayment ? (
+            <>
+              <div className="row-sep" />
+              <label className="flex min-h-11 items-center gap-3 px-4">
+                <span className="w-16 shrink-0 text-body">شخص</span>
+                <select className="field" value={personId} onChange={(e) => setPersonId(e.target.value)}>
+                  <option value="">بدون</option>
+                  {people.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : null}
           <div className="row-sep" />
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">المحفظة</span>
@@ -240,7 +275,7 @@ export function TxnForm({ id }: { id?: string }) {
             <>
               <div className="row-sep" />
               <div className="px-4 py-3">
-                <img src={preview} alt="إيصال" className="h-36 w-full rounded-cell object-cover" />
+                <img src={preview} alt="إيصال" className="receipt-img h-36 w-full rounded-inner object-cover" />
                 <button
                   type="button"
                   className="mt-2 min-h-11 text-sub text-expense"
@@ -295,12 +330,10 @@ export function PersonForm({ id }: { id?: string }) {
       description="مدين أو دائن"
       container={frame}
       onClose={closeSheet}
-      trailing={
-        <PillButton onClick={save}>حفظ</PillButton>
-      }
+      trailing={<PillButton onClick={save}>حفظ</PillButton>}
     >
       <Section>
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">الاسم</span>
             <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="الاسم" />
@@ -404,7 +437,7 @@ export function DebtForm({ id }: { id?: string }) {
         />
       </div>
       <Section title="التفاصيل">
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">البيان</span>
             <input className="field" value={title} placeholder="سبب الدين" onChange={(e) => setTitle(e.target.value)} />
@@ -508,7 +541,7 @@ export function PayForm({ debtId }: { debtId: string }) {
           : "الدفعة تُسجَّل على الدين فقط، من غير لمس الرصيد."}
       </p>
       <Section>
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="w-16 shrink-0 text-body">التاريخ</span>
             <input type="date" dir="ltr" className="field" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -554,8 +587,9 @@ export function PayForm({ debtId }: { debtId: string }) {
 }
 
 export function ResetForm() {
-  const { closeSheet, frame, back } = useMizan();
+  const { closeSheet, frame, back, setPinHash } = useMizan();
   const resetAll = useFinance((s) => s.resetAll);
+  const [clearSecurityAndTasks, setClearSecurityAndTasks] = useState(false);
 
   return (
     <Sheet title="مسح البيانات" description="حذف الدفتر من هذا الجهاز" container={frame} onClose={closeSheet}>
@@ -563,11 +597,30 @@ export function ResetForm() {
         <p className="text-body text-label">
           تُحذف الحركات والديون والأشخاص والمحافظ الإضافية والأهداف من هذا الجهاز. الفئات الأساسية تبقى. لا يمكن التراجع.
         </p>
+        <div className="surface-card mt-4 overflow-hidden rounded-cell">
+          <div className="flex min-h-11 items-center justify-between gap-3 px-4 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="text-body">مسح رمز القفل والمهام المجدولة</p>
+              <p className="text-foot text-label-2">يلغي القفل ويحذف التذكيرات المجدولة أيضاً</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={clearSecurityAndTasks}
+              aria-label="مسح رمز القفل والمهام المجدولة"
+              onClick={() => setClearSecurityAndTasks((v) => !v)}
+              className={cn("h-7 w-12 shrink-0 rounded-pill p-0.5", clearSecurityAndTasks ? "bg-tint" : "bg-fill")}
+            >
+              <span className={cn("block h-6 w-6 rounded-pill bg-cell", clearSecurityAndTasks && "ms-auto")} />
+            </button>
+          </div>
+        </div>
         <div className="mt-6 flex flex-col gap-2">
           <PillButton
             tone="danger"
             onClick={() => {
-              resetAll();
+              resetAll({ clearSecurityAndTasks });
+              if (clearSecurityAndTasks) setPinHash(null);
               back();
               closeSheet();
               toast("تم مسح الدفتر");
@@ -583,4 +636,3 @@ export function ResetForm() {
     </Sheet>
   );
 }
-

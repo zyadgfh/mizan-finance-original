@@ -2,6 +2,8 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useMizan } from "@/components/finance/context";
+import { AnimatedBar } from "@/components/finance/gsap-motion";
+import { usePinShake } from "@/components/finance/motion-utils";
 import { Amount, EmptyState, Group, PillButton, Row, Section } from "@/components/finance/ui";
 import { cn } from "@/lib/cn";
 import {
@@ -55,7 +57,7 @@ export function ReportScreen() {
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <h1 className="text-largetitle font-bold tracking-title">التقرير</h1>
         <div className="mt-3 inline-flex items-center rounded-pill bg-fill">
           <button type="button" className="flex min-h-11 min-w-11 items-center justify-center text-label" onClick={() => shiftMonth(-1)} aria-label="الشهر السابق">
@@ -82,9 +84,9 @@ export function ReportScreen() {
         ) : (
           <>
             <div className="flex justify-center px-4">
-              <div className="relative h-40 w-40 rounded-pill" style={{ background: `conic-gradient(${stops.join(", ")})` }}>
+              <div className="surface-card relative h-40 w-40 rounded-pill" style={{ background: `conic-gradient(${stops.join(", ")})` }}>
                 <div className="absolute inset-4 flex items-center justify-center rounded-pill bg-grouped text-center">
-                  <span className="text-foot text-label-2">{Math.round(total)} {currencySymbol(currency)}</span>
+                  <span className="num text-foot font-medium text-label-2">{Math.round(total)} {currencySymbol(currency)}</span>
                 </div>
               </div>
             </div>
@@ -116,13 +118,13 @@ export function GoalsScreen() {
 
   return (
     <div>
-      <div className="flex items-end justify-between px-4">
+      <div data-stagger className="flex items-end justify-between px-4">
         <div>
           <h1 className="text-largetitle font-bold tracking-title">الأهداف</h1>
           <p className="mt-1 text-sub text-label-2">المدّخر يخرج من المحفظة ويبقى لك.</p>
         </div>
       </div>
-      <div className="mt-4 px-4">
+      <div data-stagger className="mt-4 px-4">
         <PillButton onClick={() => openSheet({ kind: "goal" })}>هدف جديد</PillButton>
       </div>
       {goals.length === 0 ? (
@@ -143,10 +145,8 @@ export function GoalsScreen() {
                     trailing={<Amount value={saved} currency={currency} />}
                   />
                   <div className="px-4 pb-3">
-                    <div className="h-1 overflow-hidden rounded-pill bg-fill">
-                      <div className="h-full bg-tint" style={{ width: `${pct}%` }} />
-                    </div>
-                    <p className="mt-1 text-caption text-label-2" dir="ltr">
+                    <AnimatedBar pct={pct} colorClass="bg-tint" />
+                    <p className="num mt-1 text-caption text-label-2" dir="ltr">
                       {Math.round(saved)} / {Math.round(g.target)} · {pct}%
                     </p>
                   </div>
@@ -176,21 +176,21 @@ export function GoalScreen({ id }: { id: string }) {
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <h1 className="text-title1 font-bold tracking-title">{goal.name}</h1>
         <p className="mt-4 text-sub text-label-2">المدّخر</p>
         <p className="text-largetitle font-bold tracking-title">
           <Amount value={saved} currency={currency} />
         </p>
-        <div className="mt-3 h-1 overflow-hidden rounded-pill bg-fill">
-          <div className="h-full bg-tint" style={{ width: `${pct}%` }} />
+        <div className="mt-3">
+          <AnimatedBar pct={pct} colorClass="bg-tint" />
         </div>
         <p className="mt-2 text-foot text-label-2">
           متبقٍ {Math.round(left)} {currencySymbol(currency)}
           {goal.deadline ? ` · حتى ${shortDate(goal.deadline)}` : ""}
         </p>
       </div>
-      <div className="mt-4 flex gap-2 px-4">
+      <div data-stagger className="mt-4 flex gap-2 px-4">
         <PillButton onClick={() => openSheet({ kind: "goal-move", goalId: goal.id })}>أضف</PillButton>
         <PillButton tone="gray" onClick={() => openSheet({ kind: "goal-move", goalId: goal.id, withdraw: true })}>
           اسحب
@@ -232,13 +232,13 @@ export function WalletsScreen() {
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <h1 className="text-largetitle font-bold tracking-title">المحافظ</h1>
         <p className="mt-1 text-sub text-label-2">
           المجموع <Amount value={data.wallets.reduce((s, w) => s + walletBalance(w.id, data), 0)} currency={data.currency} sign="auto" />
         </p>
       </div>
-      <div className="mt-4 flex gap-2 px-4">
+      <div data-stagger className="mt-4 flex gap-2 px-4">
         <PillButton onClick={() => openSheet({ kind: "transfer" })}>تحويل</PillButton>
         <PillButton tone="gray" onClick={() => openSheet({ kind: "wallet" })}>
           محفظة
@@ -295,11 +295,11 @@ export function RecurringScreen() {
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <h1 className="text-largetitle font-bold tracking-title">المتكرر</h1>
         <p className="mt-1 text-sub text-label-2">يظهر كل شهر للتأكيد، ولا يُسجَّل وحده.</p>
       </div>
-      <div className="mt-4 px-4">
+      <div data-stagger className="mt-4 px-4">
         <PillButton onClick={() => openSheet({ kind: "recurring" })}>إضافة</PillButton>
       </div>
       {recurring.length === 0 ? (
@@ -333,6 +333,7 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
   const { pinHash } = useMizan();
   const [digits, setDigits] = useState("");
   const [error, setError] = useState(false);
+  const { ref: dotsRef, triggerShake } = usePinShake();
 
   async function press(key: string) {
     if (!key) return;
@@ -350,6 +351,7 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
     else {
       setError(true);
       setDigits("");
+      triggerShake();
     }
   }
 
@@ -357,9 +359,15 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
     <div className="flex h-full flex-col items-center justify-center px-6 pb-10">
       <h1 className="text-title2 font-semibold">أدخل الرمز</h1>
       <p className={cn("mt-2 text-sub", error ? "text-expense" : "text-label-2")}>{error ? "رمز غير صحيح" : "ميزان مقفل على هذا الجهاز"}</p>
-      <div className="mt-6 flex gap-3" dir="ltr">
+      <div ref={dotsRef} className="mt-6 flex gap-3.5" dir="ltr">
         {[0, 1, 2, 3].map((i) => (
-          <span key={i} className={cn("h-3 w-3 rounded-pill", digits.length > i ? "bg-label" : "bg-fill")} />
+          <span
+            key={i}
+            className={cn(
+              "h-3.5 w-3.5 rounded-pill transition-transform duration-150",
+              digits.length > i ? "scale-110 bg-label" : error ? "bg-expense/35" : "bg-fill",
+            )}
+          />
         ))}
       </div>
       <div className="mt-10 grid w-full max-w-xs grid-cols-3 gap-3" dir="ltr">
@@ -370,7 +378,7 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
             <button
               key={key}
               type="button"
-              className="flex h-16 items-center justify-center rounded-pill bg-fill text-title2 font-medium text-label active:opacity-70"
+              className="flex h-16 items-center justify-center rounded-pill bg-fill text-title2 font-medium text-label active:scale-95 active:opacity-75"
               onClick={() => void press(key)}
               aria-label={key === "del" ? "حذف" : key}
             >

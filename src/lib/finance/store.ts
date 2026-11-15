@@ -1,7 +1,9 @@
 import { create } from "zustand";
-import { currentMonth, defaultWallets, isCurrency, round2, todayISO } from "./logic";
-import { clearReceipts } from "./receipts";
-import { seedData } from "./seed";
+import { clearScheduledTasks } from "../notifications/tasks.ts";
+import { currentMonth, defaultWallets, isCurrency, round2, todayISO } from "./logic.ts";
+import { writePinHash } from "./pin.ts";
+import { clearReceipts, exportAllReceipts, importAllReceipts } from "./receipts.ts";
+import { seedData } from "./seed.ts";
 import type {
   Budget,
   Category,
@@ -19,9 +21,10 @@ import type {
   TxKind,
   Wallet,
   WalletKind,
-} from "./types";
+} from "./types.ts";
 
 const KEY = "mizan.v1";
+const UPDATED_AT_KEY = "mizan.updatedAt";
 
 export type TxInput = {
   id?: string;
@@ -68,18 +71,23 @@ export type SplitInput = {
   includeMe: boolean;
 };
 
+export type ResetOptions = {
+  clearSecurityAndTasks?: boolean;
+};
+
 type RemovedTxn = { tx: Tx; payment?: Payment };
 type RemovedDebt = { debt: Debt; payments: Payment[]; txns: Tx[] };
+type RemovedPerson = { person: Person; linkedTxIds: string[] };
 
 type Actions = {
   addTxn: (input: TxInput) => string;
-  updateTxn: (id: string, input: TxInput) => void;
+  updateTxn: (id: string, input: TxInput) => boolean;
   removeTxn: (id: string) => RemovedTxn | undefined;
   restoreTxn: (tx: Tx) => void;
   addPerson: (input: PersonInput) => string;
   updatePerson: (id: string, input: PersonInput) => void;
-  removePerson: (id: string) => Person | undefined;
-  restorePerson: (person: Person) => void;
+  removePerson: (id: string) => RemovedPerson | undefined;
+  restorePerson: (person: Person, linkedTxIds?: string[]) => void;
   addDebt: (input: DebtInput) => string;
   updateDebt: (id: string, input: DebtInput) => void;
   removeDebt: (id: string) => RemovedDebt | undefined;
@@ -92,6 +100,7 @@ type Actions = {
   setBudget: (categoryId: string, limit: number) => void;
   setOpening: (n: number) => void;
   setCurrency: (c: Currency) => void;
+  setPhoneCountryCode: (code: string) => void;
   addWallet: (input: { name: string; kind: WalletKind; opening: number }) => string;
   updateWallet: (id: string, input: { name: string; kind: WalletKind; opening: number }) => void;
   removeWallet: (id: string) => boolean;
@@ -111,8 +120,8 @@ type Actions = {
   restoreGoalMove: (move: GoalMove) => void;
   splitBill: (input: SplitInput) => void;
   setReceiptFlag: (txId: string, on: boolean) => void;
-  replaceAll: (data: Data) => void;
-  resetAll: () => void;
+  replaceAll: (data: Data, remoteUpdatedAt?: number) => void;
+  resetAll: (options?: ResetOptions) => void;
 };
 
 function uid() {
@@ -124,7 +133,7 @@ const DEBT_CATS: Category[] = [
   { id: "c-debt-in", name: "تحصيل دين", kind: "income", icon: "wallet", tone: "green" },
 ];
 
-function pick(s: Data): Data {
+export function pickFinanceData(s: Data): Data {
   return {
     txns: s.txns,
     people: s.people,
@@ -134,6 +143,7 @@ function pick(s: Data): Data {
     budgets: s.budgets,
     openingBalance: s.openingBalance,
     currency: s.currency,
+    phoneCountryCode: s.phoneCountryCode,
     demo: s.demo,
     wallets: s.wallets,
     transfers: s.transfers,
@@ -145,6 +155,19 @@ function pick(s: Data): Data {
 
 function cashOpeningOf(wallets: Wallet[], fallback: number) {
   return wallets.find((w) => w.id === "w-cash")?.opening ?? fallback;
+}
+
+let skipNextUpdatedAtBump = false;
+
+export function getLocalUpdatedAt(): number {
+  if (typeof localStorage === "undefined") return 0;
+  const raw = Number(localStorage.getItem(UPDATED_AT_KEY) ?? "0");
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+export function setLocalUpdatedAt(ts: number): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(UPDATED_AT_KEY, String(Math.max(0, Math.round(ts))));
 }
 
 export const useFinance = create<Data & Actions>((set, get) => ({
@@ -169,13 +192,62 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     return id;
   },
   updateTxn: (id, input) => {
+    const existing = get().txns.find((t) => t.id === id);
+    if (!existing) return false;
+    const linkedPayment = get().payments.find((p) => p.txId === id);
+    const amount = round2(input.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return false;
+
+    if (linkedPayment) {
+      const debt = get().debts.find((d) => d.id === linkedPayment.debtId);
+      if (debt) {
+        const otherPaid = get().payments.reduce(
+          (s, p) => (p.debtId === debt.id && p.id !== linkedPayment.id ? s + p.amount : s),
+          0,
+        );
+        if (amount > round2(debt.principal - otherPaid) + 0.009) {
+          return false;
+        }
+      }
+      const nextKind = debt ? (debt.direction === "receivable" ? "income" : "expense") : existing.kind;
+      set({
+        txns: get().txns.map((t) =>
+          t.id === id
+            ? {
+                ...t,
+                kind: nextKind,
+                amount,
+                categoryId: input.categoryId,
+                note: input.note.trim(),
+                date: input.date,
+                personId: debt ? debt.personId : input.personId || undefined,
+                walletId: input.walletId || "w-cash",
+                receiptId: input.receiptId,
+              }
+            : t,
+        ),
+        payments: get().payments.map((p) =>
+          p.id === linkedPayment.id
+            ? {
+                ...p,
+                amount,
+                date: input.date,
+                note: input.note.trim(),
+                walletId: input.walletId || "w-cash",
+              }
+            : p,
+        ),
+      });
+      return true;
+    }
+
     set({
       txns: get().txns.map((t) =>
         t.id === id
           ? {
               ...t,
               kind: input.kind,
-              amount: round2(input.amount),
+              amount,
               categoryId: input.categoryId,
               note: input.note.trim(),
               date: input.date,
@@ -186,6 +258,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
           : t,
       ),
     });
+    return true;
   },
   removeTxn: (id) => {
     const tx = get().txns.find((t) => t.id === id);
@@ -222,13 +295,24 @@ export const useFinance = create<Data & Actions>((set, get) => ({
   removePerson: (id) => {
     const person = get().people.find((p) => p.id === id);
     if (!person) return undefined;
+    const linkedTxIds = get()
+      .txns.filter((t) => t.personId === id)
+      .map((t) => t.id);
     set({
       people: get().people.filter((p) => p.id !== id),
       txns: get().txns.map((t) => (t.personId === id ? { ...t, personId: undefined } : t)),
     });
-    return person;
+    return { person, linkedTxIds };
   },
-  restorePerson: (person) => set({ people: [person, ...get().people.filter((p) => p.id !== person.id)] }),
+  restorePerson: (person, linkedTxIds = []) => {
+    const idSet = new Set(linkedTxIds);
+    set({
+      people: [person, ...get().people.filter((p) => p.id !== person.id)],
+      txns: idSet.size
+        ? get().txns.map((t) => (idSet.has(t.id) ? { ...t, personId: person.id } : t))
+        : get().txns,
+    });
+  },
   addDebt: (input) => {
     const id = uid();
     const debt: Debt = {
@@ -364,6 +448,10 @@ export const useFinance = create<Data & Actions>((set, get) => ({
     set({ openingBalance: opening, wallets });
   },
   setCurrency: (c) => set({ currency: c }),
+  setPhoneCountryCode: (code) => {
+    const sanitized = code.replace(/\D/g, "").slice(0, 4);
+    set({ phoneCountryCode: sanitized || undefined });
+  },
   addWallet: (input) => {
     const id = uid();
     const wallet: Wallet = {
@@ -584,8 +672,14 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       txns: get().txns.map((t) => (t.id === txId ? { ...t, receiptId: on ? txId : undefined } : t)),
     });
   },
-  replaceAll: (data) => set({ ...data }),
-  resetAll: () => {
+  replaceAll: (data, remoteUpdatedAt) => {
+    if (typeof remoteUpdatedAt === "number") {
+      skipNextUpdatedAtBump = true;
+      setLocalUpdatedAt(remoteUpdatedAt);
+    }
+    set({ ...data });
+  },
+  resetAll: (options) => {
     const fresh = seedData();
     const wallets = defaultWallets(0);
     set({
@@ -596,6 +690,7 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       payments: [],
       budgets: [],
       openingBalance: 0,
+      phoneCountryCode: undefined,
       demo: false,
       wallets,
       transfers: [],
@@ -604,6 +699,19 @@ export const useFinance = create<Data & Actions>((set, get) => ({
       goalMoves: [],
     });
     void clearReceipts();
+    if (options?.clearSecurityAndTasks && typeof localStorage !== "undefined") {
+      try {
+        writePinHash(null);
+        clearScheduledTasks();
+      } catch {
+        /* ignore storage errors */
+      }
+      if (typeof window !== "undefined") {
+        void import("../notifications/scheduler.ts")
+          .then((m) => m.cancelAllTaskNotifications())
+          .catch(() => undefined);
+      }
+    }
   },
 }));
 
@@ -630,7 +738,7 @@ function ensureDebtCategory(
   return id;
 }
 
-function asData(raw: unknown): Data | null {
+export function asData(raw: unknown): Data | null {
   if (!raw || typeof raw !== "object") return null;
   const d = raw as Partial<Data>;
   if (!Array.isArray(d.txns) || !Array.isArray(d.categories)) return null;
@@ -646,6 +754,8 @@ function asData(raw: unknown): Data | null {
   const opening = typeof d.openingBalance === "number" ? d.openingBalance : 0;
   const wallets = Array.isArray(d.wallets) && d.wallets.length ? d.wallets : defaultWallets(opening);
   const categories = mergeCategories(d.categories.length ? d.categories : seedData().categories);
+  const phoneCountryCode =
+    typeof d.phoneCountryCode === "string" ? d.phoneCountryCode.replace(/\D/g, "").slice(0, 4) || undefined : undefined;
   return {
     txns: d.txns,
     people: d.people,
@@ -655,6 +765,7 @@ function asData(raw: unknown): Data | null {
     budgets: Array.isArray(d.budgets) ? d.budgets : [],
     openingBalance: cashOpeningOf(wallets, opening),
     currency: isCurrency(d.currency) ? d.currency : "EGP",
+    phoneCountryCode,
     demo: Boolean(d.demo),
     wallets,
     transfers: Array.isArray(d.transfers) ? d.transfers : [],
@@ -677,21 +788,63 @@ export function hydrateFinance() {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const parsed = asData(JSON.parse(raw));
-      if (parsed) useFinance.setState(parsed);
+      if (parsed) {
+        skipNextUpdatedAtBump = true;
+        useFinance.setState(parsed);
+        if (!localStorage.getItem(UPDATED_AT_KEY)) {
+          setLocalUpdatedAt(parsed.demo ? 0 : Date.now());
+        }
+      }
     }
   } catch {
     /* keep seed */
   }
   useFinance.subscribe((s) => {
-    localStorage.setItem(KEY, JSON.stringify(pick(s)));
+    localStorage.setItem(KEY, JSON.stringify(pickFinanceData(s)));
+    if (skipNextUpdatedAtBump) {
+      skipNextUpdatedAtBump = false;
+      return;
+    }
+    setLocalUpdatedAt(Date.now());
   });
   subscribed = true;
   if (!localStorage.getItem(KEY)) {
-    localStorage.setItem(KEY, JSON.stringify(pick(useFinance.getState())));
+    localStorage.setItem(KEY, JSON.stringify(pickFinanceData(useFinance.getState())));
+    setLocalUpdatedAt(0);
   }
 }
 
 function download(blob: Blob, filename: string) {
+  const nativeBridge = (
+    window as Window & {
+      MizanNative?: { shareFile?: (name: string, mimeType: string, content: string) => boolean };
+    }
+  ).MizanNative;
+
+  if (nativeBridge?.shareFile) {
+    void blob.text().then((content) => {
+      const ok = nativeBridge.shareFile?.(filename, blob.type || "application/octet-stream", content);
+      if (ok) return;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+    });
+    return;
+  }
+
+  const nav = typeof navigator !== "undefined" ? navigator : undefined;
+  if (nav && typeof nav.share === "function" && typeof nav.canShare === "function" && /Android/i.test(nav.userAgent)) {
+    const file = new File([blob], filename, { type: blob.type || "application/octet-stream" });
+    if (nav.canShare({ files: [file] })) {
+      void nav.share({ files: [file], title: filename }).catch(() => undefined);
+      return;
+    }
+  }
+
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = filename;
@@ -703,14 +856,28 @@ function download(blob: Blob, filename: string) {
 
 export function exportData() {
   download(
-    new Blob([JSON.stringify(pick(useFinance.getState()), null, 2)], { type: "application/json" }),
+    new Blob([JSON.stringify(pickFinanceData(useFinance.getState()), null, 2)], { type: "application/json" }),
     "mizan-backup.json",
   );
 }
 
+export async function exportDataAsync(options: { includeReceipts?: boolean } = {}) {
+  const base = pickFinanceData(useFinance.getState());
+  if (!options.includeReceipts) {
+    download(new Blob([JSON.stringify(base, null, 2)], { type: "application/json" }), "mizan-backup.json");
+    return;
+  }
+  const receipts = await exportAllReceipts();
+  const payload = Object.keys(receipts).length ? { ...base, receipts } : base;
+  download(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }), "mizan-backup.json");
+}
+
 function csvCell(value: string | number) {
-  const s = String(value ?? "");
-  if (/[",\n]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
+  let s = String(value ?? "");
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(s)) {
+    s = `'${s}`;
+  }
+  if (/[",\n\r]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
   return s;
 }
 
@@ -745,7 +912,17 @@ export function exportCsv() {
 }
 
 export function importData(text: string) {
-  const parsed = asData(JSON.parse(text));
+  const raw = JSON.parse(text) as Record<string, unknown>;
+  const parsed = asData(raw);
   if (!parsed) throw new Error("bad");
-  useFinance.getState().replaceAll({ ...parsed, demo: false });
+  useFinance.getState().replaceAll({ ...parsed, demo: false }, Date.now());
+  return raw;
+}
+
+export async function importDataAsync(text: string) {
+  const raw = importData(text);
+  const receipts = raw?.receipts;
+  if (receipts && typeof receipts === "object" && !Array.isArray(receipts)) {
+    await importAllReceipts(receipts as Record<string, string>);
+  }
 }

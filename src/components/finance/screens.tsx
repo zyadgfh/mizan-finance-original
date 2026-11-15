@@ -1,15 +1,18 @@
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { Cloud, ChevronLeft, ChevronRight } from "lucide-react";
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis } from "recharts";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { IconTile } from "@/components/finance/icons";
 import { useMizan } from "@/components/finance/context";
+import { AnimatedBar } from "@/components/finance/gsap-motion";
 import { Amount, EmptyState, Group, PillButton, Row, SearchField, Section, Segment } from "@/components/finance/ui";
 import {
   cashPosition,
   currencySymbol,
+  currentMonth,
   dayLabel,
   debtTotals,
+  defaultCountryCodeForCurrency,
   dueTone,
   goalsSaved,
   installmentCount,
@@ -18,6 +21,7 @@ import {
   monthLabel,
   monthWeeks,
   nextDueDate,
+  normalizeSearch,
   paidOf,
   pendingRecurring,
   personNet,
@@ -30,7 +34,7 @@ import {
   walletBalance,
   whatsappHref,
 } from "@/lib/finance/logic";
-import { exportCsv, exportData, importData, useFinance } from "@/lib/finance/store";
+import { exportCsv, exportData, exportDataAsync, importDataAsync, useFinance } from "@/lib/finance/store";
 import type { Currency, Debt, Tx } from "@/lib/finance/types";
 import { CURRENCIES } from "@/lib/finance/types";
 
@@ -46,11 +50,21 @@ function MonthSwitch() {
   const { month, shiftMonth } = useMizan();
   return (
     <div className="mt-3 inline-flex items-center rounded-pill bg-fill">
-      <button type="button" className="flex min-h-11 min-w-11 items-center justify-center text-label" onClick={() => shiftMonth(-1)} aria-label="الشهر السابق">
+      <button
+        type="button"
+        className="flex min-h-11 min-w-11 items-center justify-center text-label"
+        onClick={() => shiftMonth(-1)}
+        aria-label="الشهر السابق"
+      >
         <ChevronRight size={20} strokeWidth={2} />
       </button>
       <span className="min-w-36 text-center text-sub font-semibold">{monthLabel(month)}</span>
-      <button type="button" className="flex min-h-11 min-w-11 items-center justify-center text-label" onClick={() => shiftMonth(1)} aria-label="الشهر التالي">
+      <button
+        type="button"
+        className="flex min-h-11 min-w-11 items-center justify-center text-label"
+        onClick={() => shiftMonth(1)}
+        aria-label="الشهر التالي"
+      >
         <ChevronLeft size={20} strokeWidth={2} />
       </button>
     </div>
@@ -71,12 +85,13 @@ export function HomeScreen() {
   const weeks = monthWeeks(month, data.txns);
   const hasChart = weeks.some((w) => w.income || w.expense);
   const today = todayISO();
+  const isCurrentViewedMonth = month === currentMonth();
   const dues = data.debts
     .map((d) => ({ debt: d, rem: remaining(d, data.payments), due: nextDueDate(d, data.payments) }))
     .filter((x) => x.rem > 0 && x.due && x.due <= addDays(today, 14))
     .sort((a, b) => a.due.localeCompare(b.due));
   const recent = data.txns.filter((t) => t.date.startsWith(month)).sort(sortTx).slice(0, 6);
-  const waiting = pendingRecurring(data.recurring, month);
+  const waiting = isCurrentViewedMonth ? pendingRecurring(data.recurring, month) : [];
   const budgets = data.budgets
     .map((b) => {
       const cat = data.categories.find((c) => c.id === b.categoryId);
@@ -92,7 +107,7 @@ export function HomeScreen() {
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <h1 className="text-largetitle font-bold tracking-title">اليوم</h1>
         <MonthSwitch />
         <p className="mt-6 text-sub text-label-2">صافي الشهر</p>
@@ -117,13 +132,13 @@ export function HomeScreen() {
         </Section>
       ) : null}
 
-      <div className="mt-5 flex gap-2 overflow-x-auto px-4">
+      <div data-stagger className="mt-5 flex gap-2.5 overflow-x-auto px-4 pb-1">
         {data.wallets.map((w) => (
           <button
             key={w.id}
             type="button"
             onClick={openWallets}
-            className="min-w-32 shrink-0 rounded-cell bg-cell px-3 py-2 text-start"
+            className="surface-card min-w-32 shrink-0 rounded-cell px-3.5 py-2.5 text-start"
           >
             <span className="block text-caption text-label-2">{w.name}</span>
             <span className="mt-1 block text-sub font-semibold">
@@ -159,8 +174,7 @@ export function HomeScreen() {
                         type="button"
                         className="min-h-11 px-2 text-sub font-semibold text-tint"
                         onClick={() => {
-                          confirmRecurring(r.id);
-                          toast("سُجّلت الحركة");
+                          if (confirmRecurring(r.id)) toast("سُجّلت الحركة");
                         }}
                       >
                         تأكيد
@@ -217,7 +231,7 @@ export function HomeScreen() {
       ) : null}
 
       <Section title="أسابيع الشهر">
-        <div className="mx-4 rounded-cell bg-cell px-2 py-3">
+        <div className="surface-card mx-4 rounded-cell px-2 py-3">
           {hasChart ? <WeekChart weeks={weeks} /> : <p className="px-3 py-6 text-center text-sub text-label-2">لا حركة في هذا الشهر</p>}
           <p className="px-3 pt-1 text-caption text-label-2">الأخضر إيراد، والأحمر مصروف.</p>
         </div>
@@ -238,8 +252,8 @@ export function HomeScreen() {
                       {Math.round(b.spent)} / {Math.round(b.limit)}
                     </span>
                   </div>
-                  <div className="mt-2 h-1 overflow-hidden rounded-pill bg-fill">
-                    <div className={over ? "h-full bg-expense" : "h-full bg-tint"} style={{ width: `${pct}%` }} />
+                  <div className="mt-2">
+                    <AnimatedBar pct={pct} colorClass={over ? "bg-expense" : "bg-tint"} />
                   </div>
                 </div>
               );
@@ -282,8 +296,8 @@ function WeekChart({ weeks }: { weeks: { label: string; income: number; expense:
         <BarChart data={weeks} barGap={2} barCategoryGap="28%">
           <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--label-2)" }} axisLine={false} tickLine={false} />
           <Tooltip content={<ChartTip />} cursor={{ fill: "var(--fill)" }} />
-          <Bar dataKey="income" name="إيراد" fill="var(--green)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
-          <Bar dataKey="expense" name="مصروف" fill="var(--red)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+          <Bar dataKey="income" name="إيراد" fill="var(--green)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+          <Bar dataKey="expense" name="مصروف" fill="var(--red)" radius={[4, 4, 0, 0]} isAnimationActive={false} />
         </BarChart>
       </ResponsiveContainer>
     </div>
@@ -302,7 +316,7 @@ function ChartTip({
   const currency = useFinance((s) => s.currency);
   if (!active || !payload?.length) return null;
   return (
-    <div className="rounded-cell bg-bg-3 px-3 py-2 text-caption text-label">
+    <div className="surface-card rounded-cell px-3 py-2 text-caption text-label">
       <p className="text-label-2">{label}</p>
       {payload.map((p) => (
         <p key={p.name}>
@@ -377,7 +391,7 @@ export function LedgerScreen() {
   const txns = useFinance((s) => s.txns);
   const [scope, setScope] = useState<"all" | "month">("month");
   const [kind, setKind] = useState<"all" | "income" | "expense">("all");
-  const q = query.trim();
+  const q = normalizeSearch(query);
   const categories = useFinance((s) => s.categories);
 
   const list = useMemo(() => {
@@ -387,7 +401,7 @@ export function LedgerScreen() {
       .filter((t) => {
         if (!q) return true;
         const cat = categories.find((c) => c.id === t.categoryId)?.name ?? "";
-        return `${t.note} ${cat}`.includes(q);
+        return normalizeSearch(`${t.note} ${cat}`).includes(q);
       })
       .sort(sortTx);
   }, [txns, scope, month, kind, q, categories]);
@@ -401,10 +415,10 @@ export function LedgerScreen() {
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <h1 className="text-largetitle font-bold tracking-title">السجل</h1>
       </div>
-      <div className="mt-3 space-y-3">
+      <div data-stagger className="mt-3 space-y-3">
         <div className="px-4">
           <Segment
             value={kind}
@@ -452,7 +466,7 @@ export function DebtsScreen() {
   const people = useFinance((s) => s.people);
   const currency = useFinance((s) => s.currency);
   const [filter, setFilter] = useState<"open" | "receivable" | "payable" | "closed">("open");
-  const q = query.trim();
+  const q = normalizeSearch(query);
   const rows = debts
     .map((d) => ({ debt: d, rem: remaining(d, payments) }))
     .filter(({ debt, rem }) => {
@@ -465,7 +479,7 @@ export function DebtsScreen() {
     .filter(({ debt }) => {
       if (!q) return true;
       const name = people.find((p) => p.id === debt.personId)?.name ?? "";
-      return `${debt.title} ${name} ${debt.note}`.includes(q);
+      return normalizeSearch(`${debt.title} ${name} ${debt.note}`).includes(q);
     })
     .sort((a, b) => {
       if (filter === "closed") return b.debt.createdAt - a.debt.createdAt;
@@ -476,10 +490,10 @@ export function DebtsScreen() {
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <h1 className="text-largetitle font-bold tracking-title">الديون</h1>
       </div>
-      <div className="mt-3 space-y-3">
+      <div data-stagger className="mt-3 space-y-3">
         <div className="px-4">
           <Segment
             value={filter}
@@ -519,19 +533,19 @@ export function PeopleScreen() {
   const debts = useFinance((s) => s.debts);
   const payments = useFinance((s) => s.payments);
   const currency = useFinance((s) => s.currency);
-  const q = query.trim();
+  const q = normalizeSearch(query);
   const rows = people
-    .filter((p) => !q || `${p.name} ${p.phone} ${p.note}`.includes(q))
+    .filter((p) => !q || normalizeSearch(`${p.name} ${p.phone} ${p.note}`).includes(q))
     .map((p) => ({ person: p, net: personNet(p.id, debts, payments) }))
     .sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <h1 className="text-largetitle font-bold tracking-title">الناس</h1>
         <p className="mt-1 text-sub text-label-2">موجب يعني لك، وسالب يعني عليك.</p>
       </div>
-      <div className="mt-3">
+      <div data-stagger className="mt-3">
         <SearchField value={query} onChange={setQuery} placeholder="بحث عن شخص" />
       </div>
       {rows.length === 0 ? (
@@ -557,23 +571,24 @@ export function PeopleScreen() {
 }
 
 export function PersonScreen({ id }: { id: string }) {
-  const { openSheet, openDebt } = useMizan();
+  const { openSheet, openDebt, back } = useMizan();
   const person = useFinance((s) => s.people.find((p) => p.id === id));
   const debts = useFinance((s) => s.debts);
   const payments = useFinance((s) => s.payments);
   const txns = useFinance((s) => s.txns);
   const currency = useFinance((s) => s.currency);
+  const phoneCountryCode = useFinance((s) => s.phoneCountryCode);
   const removePerson = useFinance((s) => s.removePerson);
   const restorePerson = useFinance((s) => s.restorePerson);
-  const { back } = useMizan();
   if (!person) return <EmptyState title="غير موجود" body="هذا الشخص لم يعد في الدفتر." />;
   const net = personNet(person.id, debts, payments);
   const linked = debts.filter((d) => d.personId === person.id);
   const related = txns.filter((t) => t.personId === person.id).sort(sortTx);
+  const cc = phoneCountryCode || defaultCountryCodeForCurrency(currency);
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <h1 className="text-largetitle font-bold tracking-title">{person.name}</h1>
         <p className="mt-4 text-sub text-label-2">الصافي</p>
         <p className="text-title1 font-bold tracking-title">
@@ -599,6 +614,7 @@ export function PersonScreen({ id }: { id: string }) {
                     money(Math.abs(net), currency),
                     net >= 0 ? "receivable" : "payable",
                   ),
+                  cc,
                 );
                 if (href) window.open(href, "_blank", "noopener,noreferrer");
               }}
@@ -635,7 +651,7 @@ export function PersonScreen({ id }: { id: string }) {
           </Group>
         </Section>
       ) : null}
-      <div className="mt-6 flex justify-center">
+      <div data-stagger className="mt-6 flex justify-center">
         <PillButton
           tone="danger"
           onClick={() => {
@@ -646,7 +662,12 @@ export function PersonScreen({ id }: { id: string }) {
             const snapshot = removePerson(person.id);
             back();
             if (!snapshot) return;
-            toast("تم حذف الشخص", { action: { label: "تراجع", onClick: () => restorePerson(snapshot) } });
+            toast("تم حذف الشخص", {
+              action: {
+                label: "تراجع",
+                onClick: () => restorePerson(snapshot.person, snapshot.linkedTxIds),
+              },
+            });
           }}
         >
           حذف الشخص
@@ -657,17 +678,17 @@ export function PersonScreen({ id }: { id: string }) {
 }
 
 export function DebtScreen({ id }: { id: string }) {
-  const { openSheet } = useMizan();
+  const { openSheet, back, openPerson } = useMizan();
   const debt = useFinance((s) => s.debts.find((d) => d.id === id));
   const payments = useFinance((s) => s.payments);
   const people = useFinance((s) => s.people);
   const currency = useFinance((s) => s.currency);
+  const phoneCountryCode = useFinance((s) => s.phoneCountryCode);
   const removeDebt = useFinance((s) => s.removeDebt);
   const restoreDebt = useFinance((s) => s.restoreDebt);
   const removePayment = useFinance((s) => s.removePayment);
   const restorePayment = useFinance((s) => s.restorePayment);
   const restoreTxn = useFinance((s) => s.restoreTxn);
-  const { back, openPerson } = useMizan();
   if (!debt) return <EmptyState title="غير موجود" body="هذا الدين لم يعد في الدفتر." />;
   const person = people.find((p) => p.id === debt.personId);
   const rem = remaining(debt, payments);
@@ -678,23 +699,24 @@ export function DebtScreen({ id }: { id: string }) {
   const count = installmentCount(debt);
   const next = nextDueDate(debt, payments);
   const tone = dueTone(next, rem > 0);
+  const cc = phoneCountryCode || defaultCountryCodeForCurrency(currency);
   const wa =
     person?.phone && rem > 0
-      ? whatsappHref(person.phone, reminderText(person.name, debt.title, money(rem, currency), debt.direction))
+      ? whatsappHref(person.phone, reminderText(person.name, debt.title, money(rem, currency), debt.direction), cc)
       : "";
   const statusLabel = { paid: "مسدّد", overdue: "متأخر", soon: "قريب", later: "لاحق", open: "مفتوح" } as const;
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <p className="text-sub text-label-2">{debt.direction === "receivable" ? "لي" : "عليّ"}</p>
         <h1 className="text-title1 font-bold tracking-title">{debt.title}</h1>
         <p className="mt-4 text-sub text-label-2">المتبقي</p>
         <p className="text-largetitle font-bold tracking-title">
           <Amount value={rem} currency={currency} sign={rem <= 0 ? "none" : debt.direction === "receivable" ? "plus" : "minus"} />
         </p>
-        <div className="mt-3 h-1 overflow-hidden rounded-pill bg-fill">
-          <div className="h-full bg-tint" style={{ width: `${pct}%` }} />
+        <div className="mt-3">
+          <AnimatedBar pct={pct} colorClass="bg-tint" />
         </div>
         <p className="mt-2 text-foot text-label-2" dir="ltr">
           {paid} / {debt.principal} {currencySymbol(currency)}
@@ -715,7 +737,7 @@ export function DebtScreen({ id }: { id: string }) {
         </Group>
       </Section>
       {rem > 0 ? (
-        <div className="mt-4 flex gap-2 px-4">
+        <div data-stagger className="mt-4 flex gap-2 px-4">
           <PillButton onClick={() => openSheet({ kind: "pay", debtId: debt.id })}>سداد</PillButton>
           {wa ? (
             <PillButton tone="gray" onClick={() => window.open(wa, "_blank", "noopener,noreferrer")}>
@@ -768,7 +790,7 @@ export function DebtScreen({ id }: { id: string }) {
         )}
         <p className="px-8 pt-2 text-foot text-label-2">اضغط دفعة لحذفها، ويمكن التراجع فوراً.</p>
       </Section>
-      <div className="mt-6 flex justify-center">
+      <div data-stagger className="mt-6 flex justify-center">
         <PillButton
           tone="danger"
           onClick={() => {
@@ -791,28 +813,40 @@ export function DebtScreen({ id }: { id: string }) {
 }
 
 export function MoreScreen() {
-  const { openSheet, openReport, openGoals, openWallets, openRecurring, openNotifications, pinHash } = useMizan();
+  const { openSheet, openReport, openGoals, openWallets, openRecurring, openNotifications, openDrive, pinHash } =
+    useMizan();
   const categories = useFinance((s) => s.categories);
   const budgets = useFinance((s) => s.budgets);
   const currency = useFinance((s) => s.currency);
+  const phoneCountryCode = useFinance((s) => s.phoneCountryCode);
   const opening = useFinance((s) => s.openingBalance);
   const setCurrency = useFinance((s) => s.setCurrency);
+  const setPhoneCountryCode = useFinance((s) => s.setPhoneCountryCode);
   const setOpening = useFinance((s) => s.setOpening);
   const setBudget = useFinance((s) => s.setBudget);
   const addCategory = useFinance((s) => s.addCategory);
   const removeCategory = useFinance((s) => s.removeCategory);
-  const txns = useFinance((s) => s.txns);
   const [kind, setKind] = useState<"expense" | "income">("expense");
   const [name, setName] = useState("");
   const [openText, setOpenText] = useState(String(opening));
+  const [ccText, setCcText] = useState(phoneCountryCode ?? "");
 
-  const expenseCats = categories.filter((c) => c.kind === "expense");
+  useEffect(() => {
+    setOpenText(String(opening));
+  }, [opening]);
+
+  useEffect(() => {
+    setCcText(phoneCountryCode ?? "");
+  }, [phoneCountryCode]);
+
+  const expenseCats = categories.filter((c) => c.kind === "expense" && c.id !== "c-debt-out");
+  const fallbackCountryCode = defaultCountryCodeForCurrency(currency);
 
   return (
     <div>
-      <div className="px-4">
+      <div data-stagger className="px-4">
         <h1 className="text-largetitle font-bold tracking-title">المزيد</h1>
-        <p className="mt-1 text-sub text-label-2">كل شيء يُحفظ على هذا الجهاز فقط.</p>
+        <p className="mt-1 text-sub text-label-2">كل شيء يُحفظ على هذا الجهاز أولاً.</p>
       </div>
 
       <Section title="أدوات">
@@ -822,12 +856,23 @@ export function MoreScreen() {
           <Row title="أهداف الادخار" chevron onClick={openGoals} />
           <Row title="حركات متكررة" chevron onClick={openRecurring} />
           <Row title="الإشعارات والمهام" sub="تذكيرات الديون والفواتير" chevron onClick={openNotifications} />
+          <Row
+            title="مزامنة Google Drive"
+            sub="نسخة خاصة مشفّرة في appDataFolder"
+            leading={
+              <span className="icon-tile" style={{ background: "var(--tint)" }}>
+                <Cloud size={16} />
+              </span>
+            }
+            chevron
+            onClick={openDrive}
+          />
           <Row title="تقسيم فاتورة" sub="حصتك مصروف وحصصهم دين لك" chevron onClick={() => openSheet({ kind: "split" })} />
           <Row title={pinHash ? "القفل مفعّل" : "قفل برمز"} sub="أربع خانات على هذا الجهاز" chevron onClick={() => openSheet({ kind: "pin" })} />
         </Group>
       </Section>
 
-      <Section title="العملة" footer="تغيير العملة لا يحوّل المبالغ المسجّلة.">
+      <Section title="العملة وكود الدولة" footer="تغيير العملة لا يحوّل المبالغ المسجّلة. كود الدولة يُستخدم لتنسيق روابط واتساب المحلية.">
         <Group>
           {CURRENCIES.map((c) => (
             <Row
@@ -838,11 +883,24 @@ export function MoreScreen() {
               trailing={c === currency ? <span className="text-tint">✓</span> : null}
             />
           ))}
+          <label className="flex min-h-11 items-center gap-3 px-4">
+            <span className="flex-1 text-body">كود دولة واتساب</span>
+            <input
+              className="field num w-24 text-end"
+              dir="ltr"
+              inputMode="numeric"
+              value={ccText}
+              placeholder={fallbackCountryCode}
+              aria-label="كود دولة واتساب"
+              onChange={(e) => setCcText(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              onBlur={() => setPhoneCountryCode(ccText)}
+            />
+          </label>
         </Group>
       </Section>
 
       <Section title="افتتاحي الكاش" footer="رصيد الكاش قبل أول حركة. باقي المحافظ تُعدَّل من شاشة المحافظ.">
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <label className="flex min-h-11 items-center gap-3 px-4">
             <span className="text-body">المبلغ</span>
             <input
@@ -869,7 +927,7 @@ export function MoreScreen() {
           {expenseCats.map((c) => {
             const limit = budgets.find((b) => b.categoryId === c.id)?.limit ?? 0;
             return (
-              <label key={c.id} className="flex min-h-11 items-center gap-3 px-4 py-2">
+              <label key={`${c.id}-${limit}`} className="flex min-h-11 items-center gap-3 px-4 py-2">
                 <IconTile name={c.icon} tone={c.tone} />
                 <span className="flex-1 text-body">{c.name}</span>
                 <input
@@ -891,7 +949,7 @@ export function MoreScreen() {
       </Section>
 
       <Section title="فئة جديدة">
-        <div className="mx-4 overflow-hidden rounded-cell bg-cell">
+        <div className="surface-card mx-4 overflow-hidden rounded-cell">
           <div className="px-3 py-3">
             <Segment
               value={kind}
@@ -935,12 +993,10 @@ export function MoreScreen() {
                   title={c.name}
                   sub={c.kind === "income" ? "إيراد" : "مصروف"}
                   onClick={() => {
-                    const used = txns.some((t) => t.categoryId === c.id);
-                    if (used) {
-                      toast("الفئة مستخدمة في حركات");
+                    if (!removeCategory(c.id)) {
+                      toast("الفئة مستخدمة في حركات أو تكرار");
                       return;
                     }
-                    removeCategory(c.id);
                     toast("حُذفت الفئة");
                   }}
                   trailing={<span className="text-foot text-expense">حذف</span>}
@@ -952,7 +1008,15 @@ export function MoreScreen() {
 
       <Section title="نسخة احتياطية">
         <Group>
-          <Row title="تصدير JSON" sub="نسخة كاملة" chevron onClick={() => exportData()} />
+          <Row title="تصدير JSON" sub="نسخة خفيفة للبيانات" chevron onClick={() => exportData()} />
+          <Row
+            title="تصدير JSON مع الإيصالات"
+            sub="يشمل صور الإيصالات المحفوظة"
+            chevron
+            onClick={() => {
+              void exportDataAsync({ includeReceipts: true }).then(() => toast("تم تصدير النسخة الكاملة"));
+            }}
+          />
           <Row title="تصدير Excel" sub="ملف CSV يفتح في Excel" chevron onClick={() => exportCsv()} />
           <Row
             title="استيراد ملف"
@@ -971,7 +1035,7 @@ export function MoreScreen() {
             e.target.value = "";
             if (!file) return;
             try {
-              importData(await file.text());
+              await importDataAsync(await file.text());
               toast("تم الاستيراد");
             } catch {
               toast("الملف غير مفهوم");
