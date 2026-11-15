@@ -673,3 +673,71 @@ test("ErrorBoundary catches crashes with recovery UI and scrubs financial data f
     console.error = origConsoleError;
   }
 });
+
+test("AuthScreen disables public sign-up and Google OAuth, enforcing owner-only accounts with forgot-password support", async () => {
+  const { AuthScreen } = await viteServer.ssrLoadModule("/src/components/finance/auth-screen.tsx");
+  const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
+
+  updateUiPrefs({ language: "ar", numeralStyle: "latn", analyticsEnabled: true });
+  render(React.createElement(AuthScreen, {}));
+
+  assert.ok(screen.getByText(/مالك المنصة فقط هو من ينشئ الحسابات/));
+  assert.equal(screen.queryByRole("tab", { name: /إنشاء حساب/i }), null);
+  assert.equal(screen.queryByText(/Google/i), null);
+
+  fireEvent.click(screen.getByRole("button", { name: "نسيت كلمة المرور؟" }));
+  await waitFor(() => {
+    assert.ok(screen.getByText("استعادة كلمة المرور"));
+  });
+});
+
+test("SuperAdminScreen renders owner-only account provisioning and payment confirmation tabs", async () => {
+  const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
+  const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
+  const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
+
+  updateUiPrefs({ language: "ar", numeralStyle: "latn", analyticsEnabled: true });
+  win.localStorage.setItem("mizan.tenant.t-personal-1.v1", JSON.stringify(seedData()));
+
+  render(
+    React.createElement(MizanRoot, {
+      skipSplash: true,
+      initialRoute: { name: "admin" },
+      initialSession: makeTestSession({ isSuperAdmin: true }),
+    }),
+  );
+
+  await waitFor(() => {
+    assert.ok(screen.getByText(/إنشاء حساب مستخدم جديد/));
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: /المدفوعات/ }));
+  await waitFor(() => {
+    assert.ok(screen.getByText(/طلبات تأكيد الدفع/));
+  });
+});
+
+test("TenantSettingsScreen Billing tab shows manual payment reference submission for non-super-admins", async () => {
+  const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
+  const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
+  const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
+
+  updateUiPrefs({ language: "ar", numeralStyle: "latn", analyticsEnabled: true });
+  win.localStorage.setItem("mizan.tenant.t-personal-1.v1", JSON.stringify(seedData()));
+
+  render(
+    React.createElement(MizanRoot, {
+      skipSplash: true,
+      initialRoute: { name: "tenant" },
+      initialSession: makeTestSession({ isSuperAdmin: false }),
+    }),
+  );
+
+  const billingTab = await screen.findByRole("button", { name: "الاشتراك" });
+  fireEvent.click(billingTab);
+
+  await waitFor(() => {
+    assert.ok(screen.getByText(/تأكيد الدفع عبر إنستاباي أو فودافون كاش/));
+  });
+});
+

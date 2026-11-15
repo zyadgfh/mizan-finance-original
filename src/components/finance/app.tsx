@@ -80,6 +80,7 @@ import {
   saveDriveSyncPrefs,
 } from "@/lib/sync/google-drive-gis";
 import { TenantProvider, useTenant, type InitialTestSession } from "@/lib/tenant/context";
+import { updateMyPassword } from "@/lib/tenant/api";
 import { formatRoleLabel } from "@/lib/tenant/types";
 
 const AuthScreen = lazy(() => import("@/components/finance/auth-screen").then((m) => ({ default: m.AuthScreen })));
@@ -202,9 +203,11 @@ function TenantAuthGate({
   requestedInviteCode?: string;
   initialRoute?: Route;
 }) {
-  const { authStatus, activeTenant } = useTenant();
+  const { authStatus, activeTenant, passwordRecoveryPending, clearPasswordRecovery } = useTenant();
   const { lang, dir } = useI18n();
   const [showSplash, setShowSplash] = useState(!skipSplash);
+  const [newRecoveryPass, setNewRecoveryPass] = useState("");
+  const [savingRecoveryPass, setSavingRecoveryPass] = useState(false);
 
   useIsomorphicLayoutEffect(() => {
     markBootStart();
@@ -218,6 +221,25 @@ function TenantAuthGate({
     applyDocumentLanguageAndDir(lang);
   }, [lang]);
 
+  const handleSaveRecoveryPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newRecoveryPass.length < 6) {
+      toast.error(lang === "en" ? "Password must be at least 6 characters" : "كلمة المرور 6 أحرف على الأقل");
+      return;
+    }
+    setSavingRecoveryPass(true);
+    try {
+      await updateMyPassword(newRecoveryPass);
+      setNewRecoveryPass("");
+      clearPasswordRecovery();
+      toast.success(lang === "en" ? "Password updated successfully" : "تم تحديث كلمة المرور بنجاح");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed");
+    } finally {
+      setSavingRecoveryPass(false);
+    }
+  };
+
   return (
     <div dir={dir}>
       {authStatus === "loading" ? (
@@ -230,6 +252,52 @@ function TenantAuthGate({
         </Suspense>
       ) : (
         <App initialRoute={initialRoute} />
+      )}
+
+      {passwordRecoveryPending && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <form
+            onSubmit={handleSaveRecoveryPassword}
+            className="w-full max-w-sm rounded-2xl bg-[var(--surface)] border border-[var(--sep)] p-5 space-y-3 shadow-xl"
+          >
+            <div className="font-bold text-[16px]">
+              {lang === "en" ? "Set New Password" : "تعيين كلمة مرور جديدة"}
+            </div>
+            <p className="text-[12px] text-[var(--label-3)]">
+              {lang === "en"
+                ? "Enter a new password for your Mizan account."
+                : "أدخل كلمة المرور الجديدة لحسابك في ميزان."}
+            </p>
+            <input
+              type="password"
+              dir="ltr"
+              minLength={6}
+              value={newRecoveryPass}
+              onChange={(e) => setNewRecoveryPass(e.target.value)}
+              placeholder="••••••••"
+              className="w-full h-11 px-3.5 rounded-xl bg-[var(--fill)] text-[14px]"
+              required
+            />
+            <div className="flex items-center gap-2">
+              <PillButton type="submit" disabled={savingRecoveryPass} className="flex-1 h-10 text-[13px] justify-center">
+                {savingRecoveryPass
+                  ? lang === "en"
+                    ? "Saving…"
+                    : "جارٍ الحفظ…"
+                  : lang === "en"
+                    ? "Save Password"
+                    : "حفظ كلمة المرور"}
+              </PillButton>
+              <button
+                type="button"
+                onClick={clearPasswordRecovery}
+                className="h-10 px-3 rounded-xl bg-[var(--fill)] text-[12px]"
+              >
+                {lang === "en" ? "Cancel" : "إلغاء"}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
 
       {showSplash ? (

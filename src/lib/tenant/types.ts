@@ -5,6 +5,8 @@ export type TenantKind = "personal" | "family" | "business";
 export type TenantMode = "cloud" | "local";
 export type PlanCode = "monthly" | "yearly";
 export type SubscriptionStatus = "trialing" | "active" | "past_due" | "suspended";
+export type PaymentMethod = "instapay" | "vodafone_cash" | "bank_transfer" | "other";
+export type PaymentRequestStatus = "pending" | "approved" | "rejected";
 
 export type EntityType =
   | "tx"
@@ -35,6 +37,49 @@ export type SubscriptionPlan = {
   billingInterval: "month" | "year";
   trialDays: number;
   isActive: boolean;
+};
+
+export type PlatformBillingInfo = {
+  instapayHandle: string;
+  vodafoneCashNumber: string;
+  bankDetails: string;
+  instructionsAr: string;
+  instructionsEn: string;
+  updatedAt: string;
+};
+
+export type PaymentRequestItem = {
+  id: string;
+  tenantId: string;
+  tenantName: string;
+  submittedBy: string;
+  submitterEmail: string;
+  planCode: PlanCode;
+  amountEgp: number;
+  paymentMethod: PaymentMethod;
+  referenceCode: string;
+  senderHandle: string | null;
+  notes: string | null;
+  status: PaymentRequestStatus;
+  reviewedAt: string | null;
+  adminNote: string | null;
+  createdAt: string;
+};
+
+export type AdminManagedUser = {
+  id: string;
+  email: string;
+  displayName: string;
+  isSuperAdmin: boolean;
+  banned: boolean;
+  createdAt: string;
+  lastSignInAt: string | null;
+  workspaces: Array<{
+    tenantId: string;
+    name: string;
+    slug: string;
+    role: string;
+  }>;
 };
 
 export type TenantSummary = {

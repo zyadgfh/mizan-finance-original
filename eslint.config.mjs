@@ -12,6 +12,7 @@ export default tseslint.config(
       "dist/**",
       "native-dist/**",
       "android/**",
+      "supabase/functions/**",
       ".output/**",
       ".vercel/**",
       ".nitro/**",

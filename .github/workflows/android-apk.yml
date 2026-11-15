@@ -46,14 +46,54 @@ jobs:
       - name: Build native bundle and sync Capacitor Android
         run: npm run cap:sync
 
-      - name: Build Android Debug APK
+      - name: Prepare Release Keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          KEYSTORE_FILE="/tmp/mizan-release.jks"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$KEYSTORE_FILE"
+            echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASSWORD=${KS_PASS:-mizan-release-key}" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_ALIAS=${KEY_ALIAS:-mizan}" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_PASSWORD=${KEY_PASS:-mizan-release-key}" >> "$GITHUB_ENV"
+          else
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_FILE" \
+              -storetype PKCS12 \
+              -alias mizan \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "mizan-release-key" \
+              -keypass "mizan-release-key" \
+              -dname "CN=Mizan Finance, OU=Mobile, O=Mizan, L=Hurghada, ST=Red Sea, C=EG"
+            echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASSWORD=mizan-release-key" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_ALIAS=mizan" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_PASSWORD=mizan-release-key" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Android Signed Release & Debug APKs
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleRelease assembleDebug --no-daemon
 
-      - name: Stage APK artifact
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk mizan-debug.apk
+      - name: Stage APK artifacts
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk mizan-finance-release.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk mizan-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mizan-release-apk
+          path: mizan-finance-release.apk
+          if-no-files-found: error
+          retention-days: 60
 
       - uses: actions/upload-artifact@v4
         with:
@@ -62,15 +102,31 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Publish Signed Release APK to GitHub Releases on main
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v2.0.${{ github.run_number }}"
+          APK_SHA="$(sha256sum mizan-finance-release.apk | awk '{print $1}')"
+          gh release create "$TAG" mizan-finance-release.apk \
+            --title "Mizan Finance v2.0.${{ github.run_number }} (Multi-Tenant Release APK)" \
+            --notes "Signed Android Release APK for Mizan Finance Multi-Tenant Platform.
+
+          - Direct Download: \`mizan-finance-release.apk\`
+          - Commit: \`${{ github.sha }}\`
+          - SHA-256: \`${APK_SHA}\`" \
+            --latest
+
       - name: Publish APK blob checksum status for sandbox retrieval
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          APK_SHA256="$(sha256sum mizan-debug.apk | awk '{print $1}')"
+          APK_SHA256="$(sha256sum mizan-finance-release.apk | awk '{print $1}')"
           BLOB_SHA="$(node -e '
             const fs = require("fs");
             const payload = JSON.stringify({
-              content: fs.readFileSync("mizan-debug.apk").toString("base64"),
+              content: fs.readFileSync("mizan-finance-release.apk").toString("base64"),
               encoding: "base64"
             });
             fs.writeFileSync("/tmp/blob.json", payload);
@@ -79,4 +135,4 @@ jobs:
             -f state="success" \
             -f context="mizan/android-apk" \
             -f description="blob:${BLOB_SHA}:${APK_SHA256:0:16}"
-          rm -f /tmp/blob.json
+          rm -f /tmp/blob.json /tmp/mizan-release.jks

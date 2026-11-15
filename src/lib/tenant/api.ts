@@ -1,4 +1,4 @@
-import { getSupabaseClient } from "../supabase/client.ts";
+import { getSupabaseClient, SUPABASE_ANON_KEY, SUPABASE_URL } from "../supabase/client.ts";
 import type { Currency, Data } from "../finance/types.ts";
 import {
   enqueueTenantOutboxOps,
@@ -10,10 +10,15 @@ import {
   type RemoteTenantRecord,
 } from "./storage.ts";
 import type {
+  AdminManagedUser,
   AdminTenantOverview,
   AuditLogItem,
   OutboxOp,
+  PaymentMethod,
+  PaymentRequestItem,
+  PaymentRequestStatus,
   PlanCode,
+  PlatformBillingInfo,
   SubscriptionPlan,
   SubscriptionStatus,
   SyncRejectedItem,
@@ -58,6 +63,26 @@ function mapTenantRow(row: Record<string, unknown>, role: TenantRole): TenantSum
   };
 }
 
+function mapPaymentRequestRow(r: Record<string, unknown>): PaymentRequestItem {
+  return {
+    id: String(r.id),
+    tenantId: String(r.tenant_id),
+    tenantName: String(r.tenant_name ?? ""),
+    submittedBy: String(r.submitted_by ?? ""),
+    submitterEmail: String(r.submitter_email ?? ""),
+    planCode: r.plan_code === "yearly" ? "yearly" : "monthly",
+    amountEgp: Number(r.amount_egp ?? 0),
+    paymentMethod: (r.payment_method as PaymentMethod) || "instapay",
+    referenceCode: String(r.reference_code ?? ""),
+    senderHandle: (r.sender_handle as string | null) ?? null,
+    notes: (r.notes as string | null) ?? null,
+    status: (r.status as PaymentRequestStatus) || "pending",
+    reviewedAt: (r.reviewed_at as string | null) ?? null,
+    adminNote: (r.admin_note as string | null) ?? null,
+    createdAt: String(r.created_at ?? new Date().toISOString()),
+  };
+}
+
 export async function signInWithEmailPassword(email: string, password: string): Promise<TenantUser> {
   const sb = getSupabaseClient();
   const { data, error } = await sb.auth.signInWithPassword({ email: email.trim(), password });
@@ -66,40 +91,78 @@ export async function signInWithEmailPassword(email: string, password: string): 
   return userFromAuth(data.user);
 }
 
-export async function signUpWithEmailPassword(
-  email: string,
-  password: string,
-  displayName: string,
-): Promise<{ user: TenantUser; needsConfirmation: boolean }> {
-  const sb = getSupabaseClient();
-  const { data, error } = await sb.auth.signUp({
-    email: email.trim(),
-    password,
-    options: {
-      data: {
-        display_name: displayName.trim() || email.split("@")[0] || "مستخدم ميزان",
-        full_name: displayName.trim() || email.split("@")[0] || "مستخدم ميزان",
-      },
-    },
-  });
-  if (error) throw new Error(error.message);
-  if (!data.user) throw new Error("تعذّر إنشاء الحساب");
-  return {
-    user: userFromAuth(data.user),
-    needsConfirmation: !data.session,
-  };
-}
-
-export async function signInWithGoogleOAuth(redirectTo?: string): Promise<void> {
+export async function requestPasswordResetEmail(email: string, redirectTo?: string): Promise<void> {
   const sb = getSupabaseClient();
   const target =
     redirectTo ||
-    (typeof window !== "undefined" ? `${window.location.origin}/` : "http://localhost:8080/");
-  const { error } = await sb.auth.signInWithOAuth({
-    provider: "google",
-    options: { redirectTo: target },
-  });
+    (typeof window !== "undefined" ? `${window.location.origin}/` : "https://mizan-finance-rho.vercel.app/");
+  const { error } = await sb.auth.resetPasswordForEmail(email.trim(), { redirectTo: target });
   if (error) throw new Error(error.message);
+}
+
+export async function updateMyPassword(newPassword: string): Promise<void> {
+  if (!newPassword || newPassword.length < 6) {
+    throw new Error("كلمة المرور الجديدة يجب ألا تقل عن 6 أحرف");
+  }
+  const sb = getSupabaseClient();
+  const { error } = await sb.auth.updateUser({ password: newPassword });
+  if (error) throw new Error(error.message);
+}
+
+export async function checkHasPlatformOwner(): Promise<boolean> {
+  try {
+    const sb = getSupabaseClient();
+    const { data, error } = await sb.rpc("has_platform_owner");
+    if (error) return true;
+    return Boolean(data);
+  } catch {
+    return true;
+  }
+}
+
+async function callAdminUsersFunction(
+  body: Record<string, unknown>,
+  requireAuth = true,
+): Promise<Record<string, unknown>> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    apikey: SUPABASE_ANON_KEY,
+  };
+  if (requireAuth) {
+    const sb = getSupabaseClient();
+    const { data } = await sb.auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) throw new Error("يجب تسجيل الدخول بصلاحية مالك المنصة أولاً");
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/admin-users`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) {
+    throw new Error(typeof json.error === "string" ? json.error : "فشل تنفيذ عملية الإدارة");
+  }
+  return json;
+}
+
+export async function setupInitialPlatformOwner(input: {
+  email: string;
+  password: string;
+  displayName?: string;
+}): Promise<TenantUser> {
+  await callAdminUsersFunction(
+    {
+      action: "setup_owner",
+      email: input.email.trim(),
+      password: input.password,
+      displayName: input.displayName?.trim() || "مالك المنصة",
+    },
+    false,
+  );
+  return signInWithEmailPassword(input.email, input.password);
 }
 
 export async function signOutSupabase(): Promise<void> {
@@ -131,7 +194,6 @@ export async function fetchMyWorkspaceBundle(user: TenantUser): Promise<{
 }> {
   const sb = getSupabaseClient();
 
-  // Attempt one-time bootstrap if platform_admins is empty or owner email matches
   let isSuperAdmin = false;
   try {
     const { data: adminFlag } = await sb.rpc("bootstrap_first_super_admin");
@@ -367,6 +429,90 @@ export async function activateTenantPlan(tenantId: string, planCode: PlanCode): 
   return mapTenantRow(data as Record<string, unknown>, "owner");
 }
 
+// Platform Billing Info & Manual Payment Confirmation Requests
+export async function fetchPlatformBillingInfo(): Promise<PlatformBillingInfo> {
+  const sb = getSupabaseClient();
+  const { data, error } = await sb.from("platform_billing_info").select("*").eq("id", 1).maybeSingle();
+  if (error || !data) {
+    return {
+      instapayHandle: "",
+      vodafoneCashNumber: "",
+      bankDetails: "",
+      instructionsAr: "حوّل قيمة الباقة عبر إنستاباي أو فودافون كاش ثم أدخل رقم العملية المرجعي ليعتمدها مالك المنصة.",
+      instructionsEn: "Transfer the plan amount via InstaPay or Vodafone Cash, then submit the reference code for approval.",
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  return {
+    instapayHandle: String(data.instapay_handle ?? ""),
+    vodafoneCashNumber: String(data.vodafone_cash_number ?? ""),
+    bankDetails: String(data.bank_details ?? ""),
+    instructionsAr: String(data.instructions_ar ?? ""),
+    instructionsEn: String(data.instructions_en ?? ""),
+    updatedAt: String(data.updated_at ?? new Date().toISOString()),
+  };
+}
+
+export async function adminUpdatePlatformBillingInfo(
+  patch: Partial<Omit<PlatformBillingInfo, "updatedAt">>,
+): Promise<void> {
+  const sb = getSupabaseClient();
+  const updates: Record<string, unknown> = { id: 1, updated_at: new Date().toISOString() };
+  if (patch.instapayHandle !== undefined) updates.instapay_handle = patch.instapayHandle.trim();
+  if (patch.vodafoneCashNumber !== undefined) updates.vodafone_cash_number = patch.vodafoneCashNumber.trim();
+  if (patch.bankDetails !== undefined) updates.bank_details = patch.bankDetails.trim();
+  if (patch.instructionsAr !== undefined) updates.instructions_ar = patch.instructionsAr.trim();
+  if (patch.instructionsEn !== undefined) updates.instructions_en = patch.instructionsEn.trim();
+
+  const { error } = await sb.from("platform_billing_info").upsert(updates);
+  if (error) throw new Error(error.message);
+}
+
+export async function submitPaymentRequest(input: {
+  tenantId: string;
+  planCode: PlanCode;
+  paymentMethod: PaymentMethod;
+  referenceCode: string;
+  senderHandle?: string;
+  notes?: string;
+}): Promise<PaymentRequestItem> {
+  const sb = getSupabaseClient();
+  const { data, error } = await sb.rpc("submit_payment_request", {
+    p_tenant_id: input.tenantId,
+    p_plan_code: input.planCode,
+    p_payment_method: input.paymentMethod,
+    p_reference_code: input.referenceCode.trim(),
+    p_sender_handle: input.senderHandle?.trim() || null,
+    p_notes: input.notes?.trim() || null,
+  });
+  if (error) throw new Error(error.message);
+  return mapPaymentRequestRow(data as Record<string, unknown>);
+}
+
+export async function listPaymentRequests(tenantId?: string): Promise<PaymentRequestItem[]> {
+  const sb = getSupabaseClient();
+  let query = sb.from("payment_requests").select("*").order("created_at", { ascending: false }).limit(100);
+  if (tenantId) query = query.eq("tenant_id", tenantId);
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as Record<string, unknown>[]).map(mapPaymentRequestRow);
+}
+
+export async function adminReviewPaymentRequest(input: {
+  requestId: string;
+  decision: "approved" | "rejected";
+  adminNote?: string;
+}): Promise<PaymentRequestItem> {
+  const sb = getSupabaseClient();
+  const { data, error } = await sb.rpc("admin_review_payment_request", {
+    p_request_id: input.requestId,
+    p_decision: input.decision,
+    p_admin_note: input.adminNote?.trim() || null,
+  });
+  if (error) throw new Error(error.message);
+  return mapPaymentRequestRow(data as Record<string, unknown>);
+}
+
 export async function fetchTenantAuditLogs(tenantId: string, limit = 50): Promise<AuditLogItem[]> {
   const sb = getSupabaseClient();
   const { data, error } = await sb
@@ -507,7 +653,7 @@ export function queueOutboxOperations(
   return enqueueTenantOutboxOps(tenantId, ops, storage).length;
 }
 
-// Super-Admin APIs
+// Super-Admin APIs (Tenants & Owner-Only User Provisioning)
 export async function adminListTenants(): Promise<AdminTenantOverview[]> {
   const sb = getSupabaseClient();
   const { data, error } = await sb.rpc("admin_list_tenants");
@@ -551,4 +697,67 @@ export async function adminUpdatePlanPrice(code: PlanCode, priceEgp: number): Pr
     .update({ price_egp: priceEgp, updated_at: new Date().toISOString() })
     .eq("code", code);
   if (error) throw new Error(error.message);
+}
+
+export async function adminListUsers(): Promise<AdminManagedUser[]> {
+  const res = await callAdminUsersFunction({ action: "list_users" });
+  return ((res.users ?? []) as Record<string, unknown>[]).map((u) => ({
+    id: String(u.id),
+    email: String(u.email ?? ""),
+    displayName: String(u.displayName ?? ""),
+    isSuperAdmin: Boolean(u.isSuperAdmin),
+    banned: Boolean(u.banned),
+    createdAt: String(u.createdAt ?? ""),
+    lastSignInAt: (u.lastSignInAt as string | null) ?? null,
+    workspaces: Array.isArray(u.workspaces)
+      ? (u.workspaces as Array<{ tenantId: string; name: string; slug: string; role: string }>)
+      : [],
+  }));
+}
+
+export async function adminCreateUserAccount(input: {
+  email: string;
+  password: string;
+  displayName?: string;
+  workspaceMode: "create" | "existing" | "none";
+  workspaceName?: string;
+  workspaceKind?: TenantKind;
+  baseCurrency?: Currency;
+  planCode?: PlanCode;
+  subscriptionStatus?: "active" | "trialing";
+  existingTenantId?: string;
+  existingRole?: Exclude<TenantRole, "owner">;
+}): Promise<{ user: { id: string; email: string; displayName: string }; tenantId: string | null }> {
+  const res = await callAdminUsersFunction({
+    action: "create_user",
+    ...input,
+  });
+  const u = (res.user ?? {}) as Record<string, unknown>;
+  return {
+    user: {
+      id: String(u.id ?? ""),
+      email: String(u.email ?? ""),
+      displayName: String(u.displayName ?? ""),
+    },
+    tenantId: (res.tenantId as string | null) ?? null,
+  };
+}
+
+export async function adminUpdateUserAccount(input: {
+  userId: string;
+  password?: string;
+  displayName?: string;
+  banned?: boolean;
+}): Promise<void> {
+  await callAdminUsersFunction({
+    action: "update_user",
+    ...input,
+  });
+}
+
+export async function adminDeleteUserAccount(userId: string): Promise<void> {
+  await callAdminUsersFunction({
+    action: "delete_user",
+    userId,
+  });
 }

@@ -20,11 +20,14 @@ import { useI18n } from "@/lib/finance/i18n";
 import { CURRENCIES, type Currency } from "@/lib/finance/types";
 import {
   createTenantInvite,
+  fetchPlatformBillingInfo,
   fetchTenantAuditLogs,
   fetchTenantMembers,
+  listPaymentRequests,
   listTenantInvites,
   removeTenantMember,
   revokeTenantInvite,
+  submitPaymentRequest,
   updateMemberRole,
 } from "@/lib/tenant/api";
 import { useTenant } from "@/lib/tenant/context";
@@ -33,7 +36,10 @@ import {
   formatRoleLabel,
   formatTenantKindLabel,
   type AuditLogItem,
+  type PaymentMethod,
+  type PaymentRequestItem,
   type PlanCode,
+  type PlatformBillingInfo,
   type TenantInvite,
   type TenantKind,
   type TenantMember,
@@ -46,6 +52,7 @@ export function TenantSettingsScreen() {
   const { back } = useMizan();
   const {
     user,
+    isSuperAdmin,
     activeTenant,
     plans,
     syncStatus,
@@ -69,6 +76,12 @@ export function TenantSettingsScreen() {
   const [members, setMembers] = useState<TenantMember[]>([]);
   const [invites, setInvites] = useState<TenantInvite[]>([]);
   const [logs, setLogs] = useState<AuditLogItem[]>([]);
+  const [paymentRequests, setPaymentRequests] = useState<PaymentRequestItem[]>([]);
+  const [billingInfo, setBillingInfo] = useState<PlatformBillingInfo | null>(null);
+  const [selectedPayPlan, setSelectedPayPlan] = useState<PlanCode>(activeTenant?.planCode ?? "monthly");
+  const [payMethod, setPayMethod] = useState<PaymentMethod>("instapay");
+  const [payRefCode, setPayRefCode] = useState("");
+  const [paySenderHandle, setPaySenderHandle] = useState("");
   const [inviteRole, setInviteRole] = useState<Exclude<TenantRole, "owner">>("member");
   const [inviteEmail, setInviteEmail] = useState("");
   const [busy, setBusy] = useState(false);
@@ -87,17 +100,24 @@ export function TenantSettingsScreen() {
   const loadRemoteData = useCallback(async () => {
     if (!activeTenant || activeTenant.mode !== "cloud") return;
     try {
-      const [m, l] = await Promise.all([
+      const [m, l, bInfo] = await Promise.all([
         fetchTenantMembers(activeTenant.id),
         fetchTenantAuditLogs(activeTenant.id),
+        fetchPlatformBillingInfo().catch(() => null),
       ]);
       setMembers(m);
       setLogs(l);
+      if (bInfo) setBillingInfo(bInfo);
       if (canAdminRole(activeTenant.role)) {
-        const inv = await listTenantInvites(activeTenant.id);
+        const [inv, reqs] = await Promise.all([
+          listTenantInvites(activeTenant.id),
+          listPaymentRequests(activeTenant.id).catch(() => []),
+        ]);
         setInvites(inv.filter((i) => !i.revokedAt));
+        setPaymentRequests(reqs);
       } else {
         setInvites([]);
+        setPaymentRequests([]);
       }
     } catch {
       /* offline */
@@ -184,12 +204,45 @@ export function TenantSettingsScreen() {
 
   const handlePlanSelect = async (code: PlanCode) => {
     if (!isAdmin || !isCloud) return;
+    if (!isSuperAdmin) {
+      setSelectedPayPlan(code);
+      return;
+    }
     setBusy(true);
     try {
       await activatePlan(code);
       toast.success(isAr ? "تم تفعيل الخطة بنجاح" : "Plan updated");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : isAr ? "تعذّر تحديث الخطة" : "Plan update failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSubmitPaymentRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin || !isCloud || !payRefCode.trim()) return;
+    setBusy(true);
+    try {
+      const req = await submitPaymentRequest({
+        tenantId: activeTenant.id,
+        planCode: selectedPayPlan,
+        paymentMethod: payMethod,
+        referenceCode: payRefCode.trim(),
+        senderHandle: paySenderHandle.trim() || undefined,
+      });
+      setPaymentRequests((prev) => [req, ...prev]);
+      setPayRefCode("");
+      setPaySenderHandle("");
+      toast.success(
+        isAr
+          ? "تم إرسال طلب تأكيد الدفع لمالك المنصة للمراجعة والتفعيل"
+          : "Payment confirmation submitted for owner approval",
+      );
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : isAr ? "تعذّر إرسال طلب الدفع" : "Submission failed",
+      );
     } finally {
       setBusy(false);
     }
@@ -538,23 +591,160 @@ export function TenantSettingsScreen() {
                   {isCloud && isAdmin && (
                     <PillButton
                       type="button"
-                      disabled={busy || activeTenant.subscriptionStatus === "suspended"}
+                      disabled={busy || (!isSuperAdmin && activeTenant.subscriptionStatus === "suspended" && selectedPayPlan === p.code)}
                       onClick={() => void handlePlanSelect(p.code)}
                       className="w-full h-10 text-[13px]"
                     >
-                      {current
-                        ? isAr
-                          ? "تجديد / تمديد هذه الخطة"
-                          : "Renew Plan"
-                        : isAr
-                          ? "تفعيل هذه الخطة"
-                          : "Switch to Plan"}
+                      {isSuperAdmin
+                        ? current
+                          ? isAr
+                            ? "تمديد فوري (مالك المنصة)"
+                            : "Instant Renew (Owner)"
+                          : isAr
+                            ? "تفعيل فوري (مالك المنصة)"
+                            : "Instant Activate (Owner)"
+                        : selectedPayPlan === p.code
+                          ? isAr
+                            ? "محددة للدفع أدناه ✓"
+                            : "Selected Below ✓"
+                          : isAr
+                            ? "اختيار هذه الباقة للدفع"
+                            : "Select Plan to Pay"}
                     </PillButton>
                   )}
                 </div>
               );
             })}
           </div>
+
+          {isCloud && isAdmin && (
+            <form
+              onSubmit={handleSubmitPaymentRequest}
+              className="bg-[var(--surface)] rounded-2xl p-4 border border-[var(--sep)] space-y-3"
+            >
+              <div className="font-bold text-[14px]">
+                {isAr
+                  ? "تأكيد الدفع عبر إنستاباي أو فودافون كاش"
+                  : "Manual Payment Confirmation (InstaPay / Vodafone Cash)"}
+              </div>
+              <p className="text-[12px] text-[var(--label-2)]">
+                {billingInfo
+                  ? isAr
+                    ? billingInfo.instructionsAr
+                    : billingInfo.instructionsEn
+                  : isAr
+                    ? "حوّل قيمة الباقة المختارة ثم أدخل رقم العملية المرجعي ليعتمدها مالك المنصة."
+                    : "Transfer the plan amount and enter the transaction reference code."}
+              </p>
+
+              {(billingInfo?.instapayHandle || billingInfo?.vodafoneCashNumber || billingInfo?.bankDetails) && (
+                <div className="p-3 rounded-xl bg-[var(--fill)] text-[12px] space-y-1 font-mono" dir="ltr">
+                  {billingInfo.instapayHandle && <div>InstaPay: <strong>{billingInfo.instapayHandle}</strong></div>}
+                  {billingInfo.vodafoneCashNumber && (
+                    <div>Vodafone Cash: <strong>{billingInfo.vodafoneCashNumber}</strong></div>
+                  )}
+                  {billingInfo.bankDetails && <div>Bank: <strong>{billingInfo.bankDetails}</strong></div>}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <select
+                  value={selectedPayPlan}
+                  onChange={(e) => setSelectedPayPlan(e.target.value as PlanCode)}
+                  className="h-10 px-3 rounded-xl bg-[var(--fill)] text-[13px]"
+                >
+                  {plans.map((p) => (
+                    <option key={p.code} value={p.code}>
+                      {isAr ? p.nameAr : p.nameEn} ({p.priceEgp} {isAr ? "ج.م" : "EGP"})
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={payMethod}
+                  onChange={(e) => setPayMethod(e.target.value as PaymentMethod)}
+                  className="h-10 px-3 rounded-xl bg-[var(--fill)] text-[13px]"
+                >
+                  <option value="instapay">{isAr ? "إنستاباي (InstaPay)" : "InstaPay"}</option>
+                  <option value="vodafone_cash">{isAr ? "فودافون كاش (Vodafone Cash)" : "Vodafone Cash"}</option>
+                  <option value="bank_transfer">{isAr ? "تحويل بنكي" : "Bank Transfer"}</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={payRefCode}
+                  onChange={(e) => setPayRefCode(e.target.value)}
+                  placeholder={isAr ? "رقم العملية المرجعي *" : "Transaction Reference *"}
+                  className="h-10 px-3 rounded-xl bg-[var(--fill)] text-[13px]"
+                  required
+                />
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={paySenderHandle}
+                  onChange={(e) => setPaySenderHandle(e.target.value)}
+                  placeholder={isAr ? "رقم المحول أو عنوان IPA (اختياري)" : "Sender phone / IPA (optional)"}
+                  className="h-10 px-3 rounded-xl bg-[var(--fill)] text-[13px]"
+                />
+              </div>
+
+              <PillButton type="submit" disabled={busy || !payRefCode.trim()} className="w-full h-10 text-[13px] justify-center">
+                {busy
+                  ? isAr
+                    ? "جارٍ الإرسال..."
+                    : "Submitting..."
+                  : isAr
+                    ? "إرسال طلب تأكيد الدفع للتفعيل"
+                    : "Submit Payment Reference"}
+              </PillButton>
+
+              {paymentRequests.length > 0 && (
+                <div className="pt-2 border-t border-[var(--sep)] space-y-2">
+                  <div className="text-[12px] font-semibold text-[var(--label-2)]">
+                    {isAr ? "سجل طلبات التفعيل" : "Payment Requests History"}
+                  </div>
+                  {paymentRequests.slice(0, 5).map((r) => (
+                    <div
+                      key={r.id}
+                      className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[var(--fill)] text-[12px]"
+                    >
+                      <div>
+                        <div className="font-mono font-semibold" dir="ltr">
+                          #{r.referenceCode} · {r.amountEgp} EGP
+                        </div>
+                        <div className="text-[11px] text-[var(--label-3)]">
+                          {new Date(r.createdAt).toLocaleDateString(isAr ? "ar-EG" : "en-US")}
+                        </div>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                          r.status === "approved"
+                            ? "bg-[var(--green-soft)] text-[var(--green)]"
+                            : r.status === "rejected"
+                              ? "bg-[var(--red-soft)] text-[var(--red)]"
+                              : "bg-[var(--tint-soft)] text-[var(--tint)]"
+                        }`}
+                      >
+                        {r.status === "pending"
+                          ? isAr
+                            ? "قيد المراجعة"
+                            : "Pending"
+                          : r.status === "approved"
+                            ? isAr
+                              ? "مقبول ومفعّل"
+                              : "Approved"
+                            : isAr
+                              ? "مرفوض"
+                              : "Rejected"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </form>
+          )}
         </div>
       )}
 

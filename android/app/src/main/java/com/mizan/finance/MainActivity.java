@@ -13,11 +13,16 @@ import com.getcapacitor.BridgeActivity;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
+    private volatile String pendingLaunchUrl = null;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        captureIntentDeepLink(getIntent(), false);
 
         if (getBridge() != null && getBridge().getWebView() != null) {
             getBridge().getWebView().addJavascriptInterface(new MizanNativeBridge(), "MizanNative");
@@ -45,6 +50,33 @@ public class MainActivity extends BridgeActivity {
                 );
             }
         });
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        captureIntentDeepLink(intent, true);
+    }
+
+    private void captureIntentDeepLink(Intent intent, boolean dispatchImmediately) {
+        if (intent == null || intent.getData() == null) return;
+        String url = intent.getDataString();
+        if (url == null || url.trim().isEmpty()) return;
+        pendingLaunchUrl = url;
+
+        if (dispatchImmediately && getBridge() != null && getBridge().getWebView() != null) {
+            final String quoted = JSONObject.quote(url);
+            runOnUiThread(() -> {
+                WebView webView = getBridge().getWebView();
+                if (webView != null) {
+                    webView.evaluateJavascript(
+                        "window.dispatchEvent(new CustomEvent('mizan:deeplink',{detail:" + quoted + "}));",
+                        null
+                    );
+                }
+            });
+        }
     }
 
     private final class MizanNativeBridge {
@@ -77,6 +109,13 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception e) {
                 return false;
             }
+        }
+
+        @JavascriptInterface
+        public String consumeLaunchUrl() {
+            String url = pendingLaunchUrl;
+            pendingLaunchUrl = null;
+            return url == null ? "" : url;
         }
 
         @JavascriptInterface

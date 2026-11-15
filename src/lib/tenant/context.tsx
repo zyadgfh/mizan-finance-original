@@ -10,6 +10,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { defaultExchangeRatesFor, defaultWallets } from "../finance/logic.ts";
+import { configureReceiptSyncScope, flushPendingReceiptSync } from "../finance/receipts.ts";
 import { seedData } from "../finance/seed.ts";
 import {
   applySyncedTenantData,
@@ -81,6 +82,8 @@ export type TenantContextValue = {
   rejectedSyncItems: SyncRejectedItem[];
   lastSyncedAt: number | null;
   migratedLegacyNotice: boolean;
+  passwordRecoveryPending: boolean;
+  clearPasswordRecovery: () => void;
   dismissMigratedNotice: () => void;
   dismissRejectedSync: () => void;
   switchTenant: (tenantId: string) => void;
@@ -171,6 +174,7 @@ export function TenantProvider({
   const [rejectedSyncItems, setRejectedSyncItems] = useState<SyncRejectedItem[]>([]);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [migratedLegacyNotice, setMigratedLegacyNotice] = useState(false);
+  const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(false);
 
   const syncTimerRef = useRef<number | null>(null);
   const syncingRef = useRef(false);
@@ -224,6 +228,7 @@ export function TenantProvider({
       try {
         const currentData = pickFinanceData(useFinance.getState());
         const res = await syncTenantWithSupabase(tenant.id, currentData, localStorage);
+        await flushPendingReceiptSync(tenant.id);
         applySyncedTenantData(tenant.id, res.mergedData);
         setPendingOpsCount(res.remainingOutboxCount);
         setLastSyncedAt(Date.now());
@@ -260,6 +265,12 @@ export function TenantProvider({
   useEffect(() => {
     if (authStatus !== "authenticated" || !user || !activeTenant) return;
     saveActiveTenantId(activeTenant.id);
+    const editable = canEditWorkspace(activeTenant);
+    configureReceiptSyncScope({
+      tenantId: activeTenant.id,
+      mode: activeTenant.mode,
+      canWrite: editable,
+    });
 
     const fallback = emptyWorkspaceData(activeTenant.baseCurrency, activeTenant.openingBalance ?? 0);
     hydrateTenantFinance(
@@ -268,7 +279,7 @@ export function TenantProvider({
         mode: activeTenant.mode,
         actorId: user.id,
         actorName: user.displayName,
-        canWrite: canEditWorkspace(activeTenant),
+        canWrite: editable,
         onOpsQueued: () => {
           if (typeof localStorage !== "undefined" && activeTenant.mode === "cloud") {
             setPendingOpsCount(loadTenantOutbox(activeTenant.id, localStorage).length);
@@ -421,7 +432,11 @@ export function TenantProvider({
 
     const { data: sub } = sb.auth.onAuthStateChange((event, session) => {
       if (!mounted) return;
+      if (event === "PASSWORD_RECOVERY") {
+        setPasswordRecoveryPending(true);
+      }
       if (event === "SIGNED_OUT") {
+        configureReceiptSyncScope({ tenantId: null, mode: "local", canWrite: true });
         clearFinanceTenantScope();
         wipeAllTenantCachesOnSignOut();
         setUser(null);
@@ -431,14 +446,73 @@ export function TenantProvider({
         setAuthStatus("unauthenticated");
         return;
       }
-      if ((event === "SIGNED_IN" || event === "USER_UPDATED") && session?.user) {
+      if ((event === "SIGNED_IN" || event === "USER_UPDATED" || event === "PASSWORD_RECOVERY") && session?.user) {
         void hydrateAuthenticatedUser(userFromAuth(session.user));
       }
     });
 
+    // Native Android / Capacitor deep-link handler (com.mizan.finance:// or https://...)
+    const handleDeepLinkUrl = async (rawUrl: string) => {
+      if (!rawUrl) return;
+      try {
+        const parsed = new URL(rawUrl);
+        const hashParams = new URLSearchParams(parsed.hash.replace(/^#/, ""));
+        const accessToken = hashParams.get("access_token") ?? parsed.searchParams.get("access_token");
+        const refreshToken = hashParams.get("refresh_token") ?? parsed.searchParams.get("refresh_token");
+        const linkType = hashParams.get("type") ?? parsed.searchParams.get("type");
+
+        if (accessToken && refreshToken) {
+          await sb.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+          if (linkType === "recovery") {
+            setPasswordRecoveryPending(true);
+          }
+        }
+
+        const fullPath = parsed.host ? `/${parsed.host}${parsed.pathname}` : parsed.pathname;
+        const inviteMatch = fullPath.match(/\/invite\/([A-Za-z0-9-]+)/);
+        const inviteCode = parsed.searchParams.get("invite")?.trim() || inviteMatch?.[1];
+        if (inviteCode) {
+          const normalized = inviteCode.toUpperCase();
+          if (typeof sessionStorage !== "undefined") {
+            sessionStorage.setItem(PENDING_INVITE_KEY, normalized);
+          }
+          const { data: s } = await sb.auth.getSession();
+          if (s.session?.user) {
+            try {
+              const redeemed = await redeemTenantInvite(normalized);
+              sessionStorage.removeItem(PENDING_INVITE_KEY);
+              await hydrateAuthenticatedUser(userFromAuth(s.session.user));
+              setActiveTenantId(redeemed.tenantId);
+              saveActiveTenantId(redeemed.tenantId);
+              toast.success(`تم الانضمام إلى ${redeemed.name}`);
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "تعذّر قبول الدعوة");
+            }
+          }
+        }
+      } catch {
+        /* ignore malformed deep link */
+      }
+    };
+
+    const onNativeDeepLink = (ev: Event) => {
+      const detail = (ev as CustomEvent<string>).detail;
+      if (typeof detail === "string") void handleDeepLinkUrl(detail);
+    };
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("mizan:deeplink", onNativeDeepLink);
+      const nativeBridge = (window as unknown as { MizanNative?: { consumeLaunchUrl?: () => string } }).MizanNative;
+      const launchUrl = nativeBridge?.consumeLaunchUrl?.();
+      if (launchUrl) void handleDeepLinkUrl(launchUrl);
+    }
+
     return () => {
       mounted = false;
       sub.subscription.unsubscribe();
+      if (typeof window !== "undefined") {
+        window.removeEventListener("mizan:deeplink", onNativeDeepLink);
+      }
     };
   }, [initialSession, hydrateAuthenticatedUser]);
 
@@ -651,6 +725,7 @@ export function TenantProvider({
   }, [activeTenant, syncSpecificTenant]);
 
   const signOut = useCallback(async () => {
+    configureReceiptSyncScope({ tenantId: null, mode: "local", canWrite: true });
     clearFinanceTenantScope();
     wipeAllTenantCachesOnSignOut();
     if (!initialSession) {
@@ -678,6 +753,8 @@ export function TenantProvider({
       rejectedSyncItems,
       lastSyncedAt,
       migratedLegacyNotice,
+      passwordRecoveryPending,
+      clearPasswordRecovery: () => setPasswordRecoveryPending(false),
       dismissMigratedNotice: () => setMigratedLegacyNotice(false),
       dismissRejectedSync: () => setRejectedSyncItems([]),
       switchTenant,
@@ -705,6 +782,7 @@ export function TenantProvider({
       rejectedSyncItems,
       lastSyncedAt,
       migratedLegacyNotice,
+      passwordRecoveryPending,
       switchTenant,
       switchTenantBySlug,
       refreshWorkspaces,
