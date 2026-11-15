@@ -140,8 +140,37 @@ export function applyAppearanceToDocument(
   if (typeof document === "undefined") return;
   const root = document.documentElement;
   if (!root) return;
-  root.dataset.appleTheme = prefs.appleTheme || "liquid-glass";
-  root.dataset.colorMode = prefs.colorMode || "system";
+  const theme = prefs.appleTheme || "liquid-glass";
+  const mode = prefs.colorMode || "system";
+  root.dataset.appleTheme = theme;
+  root.dataset.colorMode = mode;
+
+  const metaTheme = document.querySelector('meta[name="theme-color"]');
+  if (metaTheme) {
+    const prefersDark =
+      mode === "dark" ||
+      (mode === "system" &&
+        typeof window !== "undefined" &&
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches);
+    const lightBg: Record<AppleThemeId, string> = {
+      "liquid-glass": "#eef3fa",
+      "cupertino-classic": "#f5f5f7",
+      "titanium-pro": "#f1efe9",
+      "emerald-vault": "#edf5f1",
+      "midnight-indigo": "#eff0fa",
+      "desert-sand": "#f6f1eb",
+    };
+    const darkBg: Record<AppleThemeId, string> = {
+      "liquid-glass": "#05070c",
+      "cupertino-classic": "#000000",
+      "titanium-pro": "#0c0b0a",
+      "emerald-vault": "#040d0a",
+      "midnight-indigo": "#070816",
+      "desert-sand": "#100c09",
+    };
+    metaTheme.setAttribute("content", prefersDark ? darkBg[theme] : lightBg[theme]);
+  }
 }
 
 export function loadUiPrefs(

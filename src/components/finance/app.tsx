@@ -45,6 +45,7 @@ import { cn } from "@/lib/cn";
 import { formatNumber, shiftMonthKey, currentMonth, debtTotals } from "@/lib/finance/logic";
 import { useI18n } from "@/lib/finance/i18n";
 import { markBootStart, recordBootMetrics } from "@/lib/finance/perf-metrics";
+import { installMobileKeyboardScrollAssist } from "@/lib/mobile-safe";
 import { readPinHash, writePinHash } from "@/lib/finance/pin";
 import { applyDocumentLanguageAndDir } from "@/lib/finance/prefs";
 import {
@@ -163,6 +164,10 @@ export function MizanRoot({
   initialRoute,
   initialSession,
 }: MizanRootProps) {
+  useEffect(() => {
+    installMobileKeyboardScrollAssist();
+  }, []);
+
   return (
     <ErrorBoundary scopeName="mizan-root">
       <TenantProvider
