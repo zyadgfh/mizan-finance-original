@@ -15,12 +15,13 @@ import {
   UserMinus,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useMizan } from "@/components/finance/context";
 import { PillButton } from "@/components/finance/ui";
 import { useI18n } from "@/lib/finance/i18n";
 import { CURRENCIES, type Currency } from "@/lib/finance/types";
+import { copyTextSafe } from "@/lib/mobile-safe";
 import {
   createTenantInvite,
   fetchPlatformBillingInfo,
@@ -90,7 +91,6 @@ export function TenantSettingsScreen() {
   const [paySenderHandle, setPaySenderHandle] = useState("");
   const [payProofDataUrl, setPayProofDataUrl] = useState<string | null>(null);
   const [compressingProof, setCompressingProof] = useState(false);
-  const proofFileRef = useRef<HTMLInputElement | null>(null);
   const [inviteRole, setInviteRole] = useState<Exclude<TenantRole, "owner">>("member");
   const [inviteEmail, setInviteEmail] = useState("");
   const [busy, setBusy] = useState(false);
@@ -179,10 +179,10 @@ export function TenantSettingsScreen() {
       typeof window !== "undefined" && window.location.origin.startsWith("http")
         ? `${window.location.origin}/invite/${code}`
         : code;
-    try {
-      await navigator.clipboard.writeText(webUrl);
+    const copied = await copyTextSafe(webUrl);
+    if (copied) {
       toast.success(isAr ? "تم نسخ رابط وكود الدعوة" : "Invite link copied");
-    } catch {
+    } else {
       toast.info(code);
     }
   };
@@ -745,20 +745,19 @@ export function TenantSettingsScreen() {
                 />
               </div>
 
-              <input
-                ref={proofFileRef}
-                type="file"
-                accept="image/*"
-                onChange={(e) => void handleSelectRenewalProof(e)}
-                className="hidden"
-              />
               {!payProofDataUrl ? (
-                <button
-                  type="button"
-                  disabled={compressingProof}
-                  onClick={() => proofFileRef.current?.click()}
-                  className="w-full py-4 px-3 rounded-2xl border-2 border-dashed border-[var(--sep)] bg-[var(--fill)] flex flex-col items-center gap-1"
+                <label
+                  className={`relative w-full py-4 px-3 rounded-2xl border-2 border-dashed border-[var(--sep)] bg-[var(--fill)] flex flex-col items-center gap-1 cursor-pointer active:opacity-85 ${
+                    compressingProof ? "pointer-events-none opacity-60" : ""
+                  }`}
                 >
+                  <input
+                    type="file"
+                    accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif"
+                    disabled={compressingProof}
+                    onChange={(e) => void handleSelectRenewalProof(e)}
+                    className="sr-only"
+                  />
                   <ImagePlus className="w-6 h-6 text-[var(--tint)]" />
                   <span className="text-[12px] font-bold">
                     {compressingProof
@@ -769,7 +768,7 @@ export function TenantSettingsScreen() {
                         ? "ارفع صورة إيصال التحويل *"
                         : "Upload Transfer Screenshot *"}
                   </span>
-                </button>
+                </label>
               ) : (
                 <div className="p-2.5 rounded-2xl bg-[var(--fill)] border border-[var(--tint)] space-y-2">
                   <div className="flex items-center justify-between text-[11px]">
@@ -777,14 +776,17 @@ export function TenantSettingsScreen() {
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       {isAr ? "تم إرفاق صورة التحويل" : "Screenshot attached"}
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => proofFileRef.current?.click()}
-                      className="px-2 py-0.5 rounded bg-[var(--surface)] font-semibold flex items-center gap-1"
-                    >
+                    <label className="relative px-2.5 py-1 rounded bg-[var(--surface)] font-semibold flex items-center gap-1 cursor-pointer active:opacity-80">
+                      <input
+                        type="file"
+                        accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif"
+                        disabled={compressingProof}
+                        onChange={(e) => void handleSelectRenewalProof(e)}
+                        className="sr-only"
+                      />
                       <Upload className="w-3 h-3" />
-                      {isAr ? "تغيير" : "Replace"}
-                    </button>
+                      <span>{isAr ? "تغيير" : "Replace"}</span>
+                    </label>
                   </div>
                   <img src={payProofDataUrl} alt="Transfer proof" className="w-full max-h-40 object-contain rounded-xl" />
                 </div>

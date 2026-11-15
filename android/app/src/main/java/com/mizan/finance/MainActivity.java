@@ -1,11 +1,15 @@
 package com.mizan.finance;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
 import android.util.Base64;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebSettings;
 import android.webkit.WebView;
 import androidx.activity.OnBackPressedCallback;
 import androidx.core.content.FileProvider;
@@ -25,7 +29,12 @@ public class MainActivity extends BridgeActivity {
         captureIntentDeepLink(getIntent(), false);
 
         if (getBridge() != null && getBridge().getWebView() != null) {
-            getBridge().getWebView().addJavascriptInterface(new MizanNativeBridge(), "MizanNative");
+            WebView wv = getBridge().getWebView();
+            WebSettings settings = wv.getSettings();
+            settings.setDomStorageEnabled(true);
+            settings.setAllowFileAccess(true);
+            settings.setAllowContentAccess(true);
+            wv.addJavascriptInterface(new MizanNativeBridge(), "MizanNative");
         }
 
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
@@ -129,6 +138,24 @@ public class MainActivity extends BridgeActivity {
             try {
                 byte[] bytes = Base64.decode(base64Content == null ? "" : base64Content, Base64.DEFAULT);
                 return dispatchShareBytes(filename, mimeType, bytes);
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean copyToClipboard(String text) {
+            try {
+                final String safeText = text == null ? "" : text;
+                runOnUiThread(() -> {
+                    ClipboardManager clipboard =
+                        (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (clipboard != null) {
+                        ClipData clip = ClipData.newPlainText("Mizan", safeText);
+                        clipboard.setPrimaryClip(clip);
+                    }
+                });
+                return true;
             } catch (Exception e) {
                 return false;
             }

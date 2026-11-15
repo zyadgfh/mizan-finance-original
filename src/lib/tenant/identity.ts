@@ -89,12 +89,58 @@ export function cleanDisplayContact(
  * Compresses and resizes a transfer screenshot / receipt image on the client
  * so large mobile screenshots upload reliably and fast with zero size errors.
  */
+const IMAGE_EXT_RE = /\.(jpe?g|png|webp|gif|bmp|heic|heif)$/i;
+
+function inferImageMime(file: File, bytes?: Uint8Array): string {
+  if (file.type && file.type.startsWith("image/")) return file.type;
+  if (bytes && bytes.length >= 12) {
+    if (bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+    if (
+      bytes[0] === 0x52 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x46 &&
+      bytes[8] === 0x57 &&
+      bytes[9] === 0x45 &&
+      bytes[10] === 0x42 &&
+      bytes[11] === 0x50
+    ) {
+      return "image/webp";
+    }
+  }
+  const lower = (file.name || "").toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".gif")) return "image/gif";
+  return "image/jpeg";
+}
+
 export async function compressTransferProofImage(file: File): Promise<string> {
-  if (!file || !file.type.startsWith("image/")) {
+  if (!file) {
     throw new Error("يرجى اختيار ملف صورة صالح (JPG أو PNG أو WEBP)");
   }
-  if (file.size > 15 * 1024 * 1024) {
-    throw new Error("حجم الصورة كبير جداً (الحد الأقصى 15 ميجابايت)");
+  const hasExplicitNonImageMime =
+    Boolean(file.type) &&
+    !file.type.startsWith("image/") &&
+    file.type !== "application/octet-stream" &&
+    !IMAGE_EXT_RE.test(file.name || "");
+  if (hasExplicitNonImageMime) {
+    throw new Error("يرجى اختيار ملف صورة صالح (JPG أو PNG أو WEBP)");
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    throw new Error("حجم الصورة كبير جداً (الحد الأقصى 20 ميجابايت)");
+  }
+
+  let normalizedBlob: Blob = file;
+  if (!file.type || !file.type.startsWith("image/")) {
+    try {
+      const header = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+      const mime = inferImageMime(file, header);
+      normalizedBlob = new Blob([file], { type: mime });
+    } catch {
+      normalizedBlob = new Blob([file], { type: inferImageMime(file) });
+    }
   }
 
   const rawDataUrl = await new Promise<string>((resolve, reject) => {
@@ -104,7 +150,7 @@ export async function compressTransferProofImage(file: File): Promise<string> {
       else reject(new Error("تعذّر قراءة ملف الصورة"));
     };
     reader.onerror = () => reject(new Error("تعذّر قراءة ملف الصورة"));
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(normalizedBlob);
   });
 
   if (typeof document === "undefined" || typeof Image === "undefined") {
@@ -136,13 +182,16 @@ export async function compressTransferProofImage(file: File): Promise<string> {
     ctx.fillRect(0, 0, targetW, targetH);
     ctx.drawImage(img, 0, 0, targetW, targetH);
 
-    let out = canvas.toDataURL("image/jpeg", 0.82);
-    if (out.length > 3_800_000) {
-      out = canvas.toDataURL("image/jpeg", 0.65);
+    let out = canvas.toDataURL("image/jpeg", 0.8);
+    if (out.length > 2_600_000) {
+      out = canvas.toDataURL("image/jpeg", 0.62);
+    }
+    if (out.length > 2_600_000) {
+      out = canvas.toDataURL("image/jpeg", 0.45);
     }
     return out;
   } catch {
-    if (/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(rawDataUrl)) {
+    if (/^data:image\/(jpeg|jpg|png|webp|gif);base64,/i.test(rawDataUrl)) {
       return rawDataUrl;
     }
     throw new Error("يرجى اختيار صورة بصيغة JPG أو PNG");

@@ -126,6 +126,9 @@ const TransferForm = lazy(() =>
   import("@/components/finance/feature-forms").then((m) => ({ default: m.TransferForm })),
 );
 const WalletForm = lazy(() => import("@/components/finance/feature-forms").then((m) => ({ default: m.WalletForm })));
+const DesignStudioSheet = lazy(() =>
+  import("@/components/finance/feature-forms").then((m) => ({ default: m.DesignStudioSheet })),
+);
 const RecurringForm = lazy(() =>
   import("@/components/finance/feature-forms").then((m) => ({ default: m.RecurringForm })),
 );
@@ -596,7 +599,8 @@ function App({ initialRoute }: { initialRoute?: Route }) {
   }
 
   function guardedOpenSheet(next: Exclude<SheetState, null>) {
-    const readOnlyAllowed = next.kind === "search" || next.kind === "workspace-switcher";
+    const readOnlyAllowed =
+      next.kind === "search" || next.kind === "workspace-switcher" || next.kind === "design";
     if (!canWrite && !readOnlyAllowed) {
       toast.info(
         activeTenant?.subscriptionStatus === "suspended"
@@ -1067,6 +1071,7 @@ function App({ initialRoute }: { initialRoute?: Route }) {
               {sheet?.kind === "pin" ? <PinForm /> : null}
               {sheet?.kind === "search" ? <UnifiedSearchSheet /> : null}
               {sheet?.kind === "csv-import" ? <CsvImportSheet /> : null}
+              {sheet?.kind === "design" ? <DesignStudioSheet /> : null}
             </Suspense>
           </ErrorBoundary>
         </div>

@@ -14,11 +14,12 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { PillButton } from "@/components/finance/ui";
 import { useI18n } from "@/lib/finance/i18n";
 import { updateUiPrefs } from "@/lib/finance/prefs";
+import { copyTextSafe } from "@/lib/mobile-safe";
 import {
   fetchPlatformBillingInfo,
   getPaymentProofSignedUrl,
@@ -56,7 +57,6 @@ export function SubscriptionGateScreen({ reason }: { reason: SubscriptionBlockRe
   const [proofDataUrl, setProofDataUrl] = useState<string | null>(null);
   const [compressing, setCompressing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const fileRef = useRef<HTMLInputElement | null>(null);
 
   const loadGateInfo = useCallback(async () => {
     if (!activeTenant) return;
@@ -113,10 +113,10 @@ export function SubscriptionGateScreen({ reason }: { reason: SubscriptionBlockRe
 
   const copyText = async (val: string, label: string) => {
     if (!val) return;
-    try {
-      await navigator.clipboard.writeText(val);
+    const copied = await copyTextSafe(val);
+    if (copied) {
       toast.success(isAr ? `تم نسخ ${label}` : `${label} copied`);
-    } catch {
+    } else {
       toast.info(val);
     }
   };
@@ -186,8 +186,8 @@ export function SubscriptionGateScreen({ reason }: { reason: SubscriptionBlockRe
     availablePlans.find((p) => p.code === selectedPlan) ?? availablePlans[0] ?? DEFAULT_SUBSCRIPTION_PLANS[0];
 
   return (
-    <div className="min-h-dvh bg-[var(--surround)] flex flex-col items-center justify-center p-4 sm:p-6">
-      <div className="w-full max-w-md bg-[var(--surface)] rounded-[28px] border border-[var(--sep)] shadow-[0_24px_60px_rgba(0,0,0,0.08)] p-5 sm:p-7 space-y-5">
+    <div className="min-h-full w-full bg-[var(--surround)] flex flex-col items-center justify-start sm:justify-center p-4 pt-safe pb-safe sm:p-6">
+      <div className="my-auto w-full max-w-md bg-[var(--surface)] rounded-[28px] border border-[var(--sep)] shadow-[0_24px_60px_rgba(0,0,0,0.08)] p-5 sm:p-7 space-y-5">
         {/* Top Bar */}
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
@@ -489,20 +489,19 @@ export function SubscriptionGateScreen({ reason }: { reason: SubscriptionBlockRe
               />
             </div>
 
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/*"
-              onChange={(e) => void handleSelectProof(e)}
-              className="hidden"
-            />
             {!proofDataUrl ? (
-              <button
-                type="button"
-                disabled={compressing}
-                onClick={() => fileRef.current?.click()}
-                className="w-full py-4 px-3 rounded-2xl border-2 border-dashed border-[var(--sep)] bg-[var(--fill)] flex flex-col items-center gap-1"
+              <label
+                className={`relative w-full py-4 px-3 rounded-2xl border-2 border-dashed border-[var(--sep)] bg-[var(--fill)] flex flex-col items-center gap-1 cursor-pointer active:opacity-85 ${
+                  compressing ? "pointer-events-none opacity-60" : ""
+                }`}
               >
+                <input
+                  type="file"
+                  accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif"
+                  disabled={compressing}
+                  onChange={(e) => void handleSelectProof(e)}
+                  className="sr-only"
+                />
                 <ImagePlus className="w-6 h-6 text-[var(--tint)]" />
                 <span className="text-[12px] font-bold">
                   {compressing
@@ -513,7 +512,7 @@ export function SubscriptionGateScreen({ reason }: { reason: SubscriptionBlockRe
                       ? "ارفع صورة إيصال التحويل *"
                       : "Upload Transfer Screenshot *"}
                 </span>
-              </button>
+              </label>
             ) : (
               <div className="p-2 rounded-2xl bg-[var(--fill)] border border-[var(--tint)] space-y-1.5">
                 <div className="flex items-center justify-between text-[11px]">
@@ -521,14 +520,17 @@ export function SubscriptionGateScreen({ reason }: { reason: SubscriptionBlockRe
                     <Check className="w-3.5 h-3.5" />
                     {isAr ? "تم إرفاق الإيصال" : "Receipt attached"}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => fileRef.current?.click()}
-                    className="px-2 py-0.5 rounded bg-[var(--surface)] font-semibold flex items-center gap-1"
-                  >
+                  <label className="relative px-2.5 py-1 rounded bg-[var(--surface)] font-semibold flex items-center gap-1 cursor-pointer active:opacity-80">
+                    <input
+                      type="file"
+                      accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif"
+                      disabled={compressing}
+                      onChange={(e) => void handleSelectProof(e)}
+                      className="sr-only"
+                    />
                     <Upload className="w-3 h-3" />
-                    {isAr ? "تغيير" : "Change"}
-                  </button>
+                    <span>{isAr ? "تغيير" : "Change"}</span>
+                  </label>
                 </div>
                 <img src={proofDataUrl} alt="Proof" className="w-full max-h-40 object-contain rounded-xl" />
               </div>

@@ -1,7 +1,20 @@
-import { ChevronLeft, ChevronRight, Download, FileJson, FileSpreadsheet, Fingerprint, Image as ImageIcon, Printer } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  FileJson,
+  FileSpreadsheet,
+  Fingerprint,
+  Image as ImageIcon,
+  Palette,
+  Pencil,
+  Plus,
+  Printer,
+} from "lucide-react";
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useState } from "react";
 import { toast } from "sonner";
+import { AppleWalletCard, walletKindLabelText } from "@/components/finance/apple-cards";
 import { useMizan } from "@/components/finance/context";
 import { AnimatedBar } from "@/components/finance/gsap-motion";
 import { usePinShake } from "@/components/finance/motion-utils";
@@ -467,6 +480,7 @@ export function GoalScreen({ id }: { id: string }) {
 
 export function WalletsScreen() {
   const { openSheet } = useMizan();
+  const { lang } = useI18n();
   const data = useFinance();
   const removeTransfer = useFinance((s) => s.removeTransfer);
   const restoreTransfer = useFinance((s) => s.restoreTransfer);
@@ -474,34 +488,87 @@ export function WalletsScreen() {
   return (
     <div>
       <div data-stagger className="px-4">
-        <h1 className="text-largetitle font-bold tracking-title">المحافظ</h1>
+        <div className="flex items-center justify-between gap-2">
+          <h1 className="text-largetitle font-bold tracking-title">
+            {lang === "en" ? "Cards & Wallets" : "البطاقات والمحافظ"}
+          </h1>
+          <button
+            type="button"
+            onClick={() => openSheet({ kind: "design" })}
+            className="inline-flex min-h-10 items-center gap-1.5 rounded-pill bg-[var(--tint-soft)] px-3.5 text-caption font-semibold text-tint active:opacity-80"
+          >
+            <Palette size={15} />
+            <span>{lang === "en" ? "Apple Themes" : "تصميمات Apple"}</span>
+          </button>
+        </div>
         <p className="mt-1 text-sub text-label-2">
-          المجموع <Amount value={data.wallets.reduce((s, w) => s + walletBalance(w.id, data), 0)} currency={data.currency} sign="auto" />
+          {lang === "en" ? "Total " : "المجموع "}
+          <Amount
+            value={data.wallets.reduce((s, w) => s + walletBalance(w.id, data), 0)}
+            currency={data.currency}
+            sign="auto"
+          />
         </p>
       </div>
-      <div data-stagger className="mt-4 flex gap-2 px-4">
-        <PillButton onClick={() => openSheet({ kind: "transfer" })}>تحويل</PillButton>
+
+      <div data-stagger className="mt-4 flex flex-wrap gap-2 px-4">
+        <PillButton onClick={() => openSheet({ kind: "transfer" })}>
+          {lang === "en" ? "Transfer" : "تحويل بين المحافظ"}
+        </PillButton>
         <PillButton tone="gray" onClick={() => openSheet({ kind: "wallet" })}>
-          محفظة
+          <Plus size={16} />
+          <span>{lang === "en" ? "Add Card / Wallet" : "بطاقة / محفظة جديدة"}</span>
         </PillButton>
       </div>
-      <Section title="الأرصدة">
+
+      {/* Apple Wallet Visual Card Stack */}
+      <Section
+        title={
+          lang === "en"
+            ? "Apple Wallet View — Tap 'Edit Name' on any card"
+            : "بطاقات Apple Wallet — اضغط «تعديل الاسم» على أي بطاقة"
+        }
+      >
+        <div className="grid gap-3 px-4 sm:grid-cols-2">
+          {data.wallets.map((w) => (
+            <AppleWalletCard
+              key={w.id}
+              wallet={w}
+              balance={walletBalance(w.id, data)}
+              currency={data.currency}
+              onEdit={() => openSheet({ kind: "wallet", id: w.id })}
+            />
+          ))}
+        </div>
+      </Section>
+
+      <Section title={lang === "en" ? "Quick Rename & Balances" : "الأرصدة وتعديل الأسماء السريع"}>
         <Group>
           {data.wallets.map((w) => (
             <Row
               key={w.id}
               title={w.name}
-              sub={w.kind === "cash" ? "كاش" : w.kind === "instapay" ? "إنستاباي" : w.kind === "vodafone" ? "فودافون كاش" : w.kind === "bank" ? "بنك" : "أخرى"}
-              chevron
+              sub={`${walletKindLabelText(w.kind, lang)}${w.subtitle ? ` · ${w.subtitle}` : ""}${w.last4 ? ` · •••• ${w.last4}` : ""}`}
               onClick={() => openSheet({ kind: "wallet", id: w.id })}
-              trailing={<Amount value={walletBalance(w.id, data)} currency={data.currency} sign="auto" />}
+              trailing={
+                <span className="flex items-center gap-2">
+                  <Amount value={walletBalance(w.id, data)} currency={data.currency} sign="auto" />
+                  <span className="inline-flex items-center gap-1 rounded-pill bg-[var(--tint-soft)] px-2.5 py-1 text-[11px] font-semibold text-tint">
+                    <Pencil size={11} />
+                    <span>{lang === "en" ? "Rename" : "تعديل"}</span>
+                  </span>
+                </span>
+              }
             />
           ))}
         </Group>
       </Section>
-      <Section title="التحويلات">
+
+      <Section title={lang === "en" ? "Transfers" : "التحويلات"}>
         {data.transfers.length === 0 ? (
-          <p className="px-8 text-sub text-label-2">لا تحويلات بعد.</p>
+          <p className="px-8 text-sub text-label-2">
+            {lang === "en" ? "No transfers yet." : "لا تحويلات بعد."}
+          </p>
         ) : (
           <Group>
             {data.transfers.map((tr) => {
@@ -516,7 +583,12 @@ export function WalletsScreen() {
                   onClick={() => {
                     const snapshot = removeTransfer(tr.id);
                     if (!snapshot) return;
-                    toast("حُذف التحويل", { action: { label: "تراجع", onClick: () => restoreTransfer(snapshot) } });
+                    toast(lang === "en" ? "Transfer deleted" : "حُذف التحويل", {
+                      action: {
+                        label: lang === "en" ? "Undo" : "تراجع",
+                        onClick: () => restoreTransfer(snapshot),
+                      },
+                    });
                   }}
                 />
               );

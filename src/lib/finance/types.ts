@@ -25,7 +25,16 @@ export type DebtCadence = "monthly" | "biweekly" | "weekly";
 export type DebtStatus = "active" | "overdue" | "completed";
 export type GoalCategory = "general" | "travel" | "debt_payoff" | "device" | "emergency";
 export type TxSource = "manual" | "recurring" | "debt" | "split";
-export type WalletKind = "cash" | "instapay" | "vodafone" | "bank" | "other";
+export type WalletKind = "cash" | "instapay" | "vodafone" | "bank" | "card" | "other";
+export type WalletCardDesign =
+  | "apple-white"
+  | "titanium-dark"
+  | "ocean-blue"
+  | "emerald-cash"
+  | "royal-purple"
+  | "crimson-vodafone"
+  | "sunset-gold"
+  | "rose-quartz";
 
 export type Category = {
   id: string;
@@ -124,6 +133,9 @@ export type Wallet = ActorMeta & {
   name: string;
   kind: WalletKind;
   opening: number;
+  cardDesign?: WalletCardDesign;
+  last4?: string;
+  subtitle?: string;
   createdAt: number;
 };
 

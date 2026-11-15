@@ -22,6 +22,7 @@ import {
   useFinance,
 } from "../finance/store.ts";
 import type { Currency, Data } from "../finance/types.ts";
+import { safeRandomUUID } from "../mobile-safe.ts";
 import { getSupabaseClient } from "../supabase/client.ts";
 import {
   activateTenantPlan,
@@ -600,7 +601,7 @@ export function TenantProvider({
     }) => {
       if (!user) throw new Error("يجب تسجيل الدخول أولًا");
       if (input.mode === "local") {
-        const id = `local-${crypto.randomUUID().slice(0, 12)}`;
+        const id = `local-${safeRandomUUID().slice(0, 12)}`;
         const slugBase = input.name
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, "-")

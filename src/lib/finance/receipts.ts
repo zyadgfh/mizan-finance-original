@@ -357,19 +357,65 @@ export async function importAllReceipts(receipts: Record<string, string>) {
 }
 
 export async function compressReceipt(file: File) {
-  const bitmap = await createImageBitmap(file);
-  const max = 960;
-  const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
-  const w = Math.max(1, Math.round(bitmap.width * scale));
-  const h = Math.max(1, Math.round(bitmap.height * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("canvas");
-  ctx.drawImage(bitmap, 0, 0, w, h);
-  bitmap.close();
-  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", 0.72));
-  if (!blob) throw new Error("blob");
-  return blob;
+  const sourceBlob =
+    file.type && file.type.startsWith("image/") ? file : new Blob([file], { type: "image/jpeg" });
+
+  let width = 800;
+  let height = 800;
+  let drawToCanvas: ((ctx: CanvasRenderingContext2D, w: number, h: number) => void) | null = null;
+  let cleanup: (() => void) | null = null;
+
+  if (typeof createImageBitmap === "function") {
+    try {
+      const bitmap = await createImageBitmap(sourceBlob);
+      width = bitmap.width;
+      height = bitmap.height;
+      drawToCanvas = (ctx, w, h) => ctx.drawImage(bitmap, 0, 0, w, h);
+      cleanup = () => bitmap.close();
+    } catch {
+      /* fallback to Image element for older iOS / Android WebViews */
+    }
+  }
+
+  if (!drawToCanvas) {
+    const objectUrl = URL.createObjectURL(sourceBlob);
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error("image"));
+      };
+      el.src = objectUrl;
+    });
+    width = img.naturalWidth || img.width || 800;
+    height = img.naturalHeight || img.height || 800;
+    drawToCanvas = (ctx, w, h) => ctx.drawImage(img, 0, 0, w, h);
+    cleanup = () => URL.revokeObjectURL(objectUrl);
+  }
+
+  try {
+    const max = 960;
+    const scale = Math.min(1, max / Math.max(width, height));
+    const w = Math.max(1, Math.round(width * scale));
+    const h = Math.max(1, Math.round(height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+    drawToCanvas(ctx, w, h);
+
+    for (const quality of [0.72, 0.56, 0.42]) {
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", quality));
+      if (blob && (blob.size <= 430_000 || quality === 0.42)) {
+        return blob;
+      }
+    }
+    throw new Error("blob");
+  } finally {
+    cleanup?.();
+  }
 }
