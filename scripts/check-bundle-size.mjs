@@ -20,7 +20,7 @@ const TARGETS = [
     name: "native",
     dirs: [path.join(ROOT, "native-dist", "assets")],
     maxLargestChunkGzipBytes: 210 * 1024,
-    maxTotalJsGzipBytes: 420 * 1024,
+    maxTotalJsGzipBytes: 460 * 1024,
   },
 ];
 

@@ -24,11 +24,15 @@ import {
   wipeTenantCache,
   type RemoteTenantRecord,
 } from "./storage.ts";
+import { cleanDisplayContact, normalizeSubscriberIdentity } from "./identity.ts";
 import {
   canAdminRole,
   canEditWorkspace,
   canWriteRole,
+  DEFAULT_SUBSCRIPTION_PLANS,
   formatRoleLabel,
+  getRemainingSubscriptionDays,
+  getSubscriptionAccessBlock,
   isOwnerRole,
   type TenantSummary,
 } from "./types.ts";
@@ -309,3 +313,68 @@ test("snapshotToOutboxOps serializes full legacy snapshot and error-log scrubs J
   assert.equal(sanitized.message.includes("eyJhbGciOiJIUzI1NiJ9"), false);
   assert.equal(sanitized.message.includes("MZN-AB12-CD34"), false);
 });
+
+test("normalizeSubscriberIdentity supports email, Egyptian mobile, Arabic digits, and international phones", () => {
+  const emailRes = normalizeSubscriberIdentity("  User.Name@Gmail.COM ");
+  assert.deepEqual(emailRes, {
+    kind: "email",
+    authEmail: "user.name@gmail.com",
+    contactDisplay: "user.name@gmail.com",
+    phone: null,
+  });
+
+  const egLocal = normalizeSubscriberIdentity("01036042165");
+  assert.equal(egLocal?.kind, "phone");
+  assert.equal(egLocal?.authEmail, "p.201036042165@phone.mizan-app.local");
+  assert.equal(egLocal?.contactDisplay, "01036042165");
+
+  const egArabic = normalizeSubscriberIdentity("٠١٠٣٦٠٤٢١٦٥");
+  assert.equal(egArabic?.authEmail, "p.201036042165@phone.mizan-app.local");
+  assert.equal(egArabic?.contactDisplay, "01036042165");
+
+  const egPlus = normalizeSubscriberIdentity("+20 103 604 2165");
+  assert.equal(egPlus?.authEmail, "p.201036042165@phone.mizan-app.local");
+
+  assert.equal(cleanDisplayContact("p.201036042165@phone.mizan-app.local"), "01036042165");
+  assert.equal(cleanDisplayContact("p.966501234567@phone.mizan-app.local"), "+966501234567");
+  assert.equal(normalizeSubscriberIdentity("123"), null);
+  assert.equal(normalizeSubscriberIdentity("bad@email"), null);
+});
+
+test("4-tier packages & automatic subscription expiration gate work accurately", () => {
+  assert.deepEqual(
+    DEFAULT_SUBSCRIPTION_PLANS.map((p) => p.code),
+    ["monthly", "quarterly", "semiannual", "yearly"],
+  );
+  assert.deepEqual(
+    DEFAULT_SUBSCRIPTION_PLANS.map((p) => p.durationDays),
+    [30, 90, 180, 365],
+  );
+
+  // Pending new registration -> blocked until Owner confirms payment
+  const pendingWs = makeTenant({ subscriptionStatus: "pending_approval" });
+  assert.equal(getSubscriptionAccessBlock(pendingWs, false), "pending_approval");
+  assert.equal(canEditWorkspace(pendingWs), false);
+
+  // Active subscription whose period has ended -> auto-deactivated immediately
+  const expiredActiveWs = makeTenant({
+    subscriptionStatus: "active",
+    currentPeriodEnd: new Date(Date.now() - 60_000).toISOString(),
+  });
+  assert.equal(getRemainingSubscriptionDays(expiredActiveWs.currentPeriodEnd), 0);
+  assert.equal(getSubscriptionAccessBlock(expiredActiveWs, false), "expired");
+  assert.equal(canEditWorkspace(expiredActiveWs), false);
+
+  // Valid active subscription -> full access
+  const validWs = makeTenant({
+    subscriptionStatus: "active",
+    currentPeriodEnd: new Date(Date.now() + 86_400_000 * 10).toISOString(),
+  });
+  assert.equal(getRemainingSubscriptionDays(validWs.currentPeriodEnd), 10);
+  assert.equal(getSubscriptionAccessBlock(validWs, false), null);
+  assert.equal(canEditWorkspace(validWs), true);
+
+  // Super-Admin is never blocked
+  assert.equal(getSubscriptionAccessBlock(expiredActiveWs, true), null);
+});
+

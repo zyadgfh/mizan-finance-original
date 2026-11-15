@@ -2,17 +2,20 @@ import {
   AlertTriangle,
   Building2,
   Check,
+  CheckCircle2,
   Copy,
   CreditCard,
   History,
+  ImagePlus,
   KeyRound,
   LogOut,
   RefreshCw,
   Trash2,
+  Upload,
   UserMinus,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useMizan } from "@/components/finance/context";
 import { PillButton } from "@/components/finance/ui";
@@ -27,14 +30,18 @@ import {
   listTenantInvites,
   removeTenantMember,
   revokeTenantInvite,
-  submitPaymentRequest,
+  submitRenewalPaymentWithProof,
   updateMemberRole,
 } from "@/lib/tenant/api";
 import { useTenant } from "@/lib/tenant/context";
+import { compressTransferProofImage } from "@/lib/tenant/identity";
 import {
   canAdminRole,
+  formatPlanLabel,
   formatRoleLabel,
+  formatSubscriptionStatusLabel,
   formatTenantKindLabel,
+  getRemainingSubscriptionDays,
   type AuditLogItem,
   type PaymentMethod,
   type PaymentRequestItem,
@@ -80,8 +87,10 @@ export function TenantSettingsScreen() {
   const [billingInfo, setBillingInfo] = useState<PlatformBillingInfo | null>(null);
   const [selectedPayPlan, setSelectedPayPlan] = useState<PlanCode>(activeTenant?.planCode ?? "monthly");
   const [payMethod, setPayMethod] = useState<PaymentMethod>("instapay");
-  const [payRefCode, setPayRefCode] = useState("");
   const [paySenderHandle, setPaySenderHandle] = useState("");
+  const [payProofDataUrl, setPayProofDataUrl] = useState<string | null>(null);
+  const [compressingProof, setCompressingProof] = useState(false);
+  const proofFileRef = useRef<HTMLInputElement | null>(null);
   const [inviteRole, setInviteRole] = useState<Exclude<TenantRole, "owner">>("member");
   const [inviteEmail, setInviteEmail] = useState("");
   const [busy, setBusy] = useState(false);
@@ -219,25 +228,57 @@ export function TenantSettingsScreen() {
     }
   };
 
+  const handleSelectRenewalProof = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCompressingProof(true);
+    try {
+      const compressed = await compressTransferProofImage(file);
+      setPayProofDataUrl(compressed);
+      toast.success(isAr ? "تم إرفاق صورة التحويل" : "Transfer screenshot attached");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed");
+    } finally {
+      setCompressingProof(false);
+      e.target.value = "";
+    }
+  };
+
   const handleSubmitPaymentRequest = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAdmin || !isCloud || !payRefCode.trim()) return;
+    if (!isAdmin || !isCloud) return;
+    if (!paySenderHandle.trim() || paySenderHandle.trim().length < 3) {
+      toast.error(
+        payMethod === "instapay"
+          ? isAr
+            ? "أدخل اليوزر نيم على إنستا باي أو الرقم الذي تم منه التحويل"
+            : "Enter InstaPay username or sender phone"
+          : isAr
+            ? "أدخل الرقم الذي تم منه التحويل"
+            : "Enter sender phone number",
+      );
+      return;
+    }
+    if (!payProofDataUrl) {
+      toast.error(isAr ? "يرجى رفع صورة التحويل أولاً" : "Please upload transfer screenshot");
+      return;
+    }
     setBusy(true);
     try {
-      const req = await submitPaymentRequest({
+      const req = await submitRenewalPaymentWithProof({
         tenantId: activeTenant.id,
         planCode: selectedPayPlan,
         paymentMethod: payMethod,
-        referenceCode: payRefCode.trim(),
-        senderHandle: paySenderHandle.trim() || undefined,
+        senderHandle: paySenderHandle.trim(),
+        proofDataUrl: payProofDataUrl,
       });
       setPaymentRequests((prev) => [req, ...prev]);
-      setPayRefCode("");
       setPaySenderHandle("");
+      setPayProofDataUrl(null);
       toast.success(
         isAr
-          ? "تم إرسال طلب تأكيد الدفع لمالك المنصة للمراجعة والتفعيل"
-          : "Payment confirmation submitted for owner approval",
+          ? "تم إرسال طلب التجديد وصورة التحويل لمالك المنصة للمراجعة والتفعيل"
+          : "Payment proof submitted for owner approval",
       );
     } catch (err) {
       toast.error(
@@ -539,77 +580,81 @@ export function TenantSettingsScreen() {
       {section === "billing" && (
         <div className="space-y-3">
           <div className="bg-[var(--surface)] rounded-2xl p-4 border border-[var(--sep)] space-y-2">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-2 font-bold text-[15px]">
                 <CreditCard className="w-4 h-4 text-[var(--tint)]" />
-                {isAr ? "الباقة الحالية" : "Current Subscription"}
+                {isAr ? "حالة الاشتراك الحالي" : "Current Subscription"}
               </div>
               <span className="px-2.5 py-1 rounded-full bg-[var(--tint-soft)] text-[var(--tint)] text-[12px] font-semibold">
-                {activeTenant.subscriptionStatus === "trialing"
-                  ? isAr
-                    ? "فترة تجريبية"
-                    : "Trialing"
-                  : activeTenant.subscriptionStatus === "active"
-                    ? isAr
-                      ? "نشطة"
-                      : "Active"
-                    : activeTenant.subscriptionStatus === "suspended"
-                      ? isAr
-                        ? "معلّقة"
-                        : "Suspended"
-                      : activeTenant.subscriptionStatus}
+                {formatSubscriptionStatusLabel(activeTenant.subscriptionStatus, lang)}
               </span>
             </div>
             <p className="text-[12px] text-[var(--label-2)]">
               {isAr
-                ? "جميع المميزات متاحة بالكامل في كلتا الخطتين بدون أي قيود على المعاملات أو الأعضاء أو المساحات. فقط اختر الدفع الشهري أو السنوي الرمزي."
-                : "All features are unlocked on every plan with zero limits on records or members. Simply pick symbolic Monthly or Yearly billing."}
+                ? "جميع المميزات متاحة بالكامل في كل الباقات. عند انتهاء مدة الاشتراك يتوقف الحساب تلقائياً لحين التجديد مع حفظ كامل بياناتك."
+                : "All features are unlocked on every package. When the period ends, access pauses automatically until renewed while keeping all data safe."}
             </p>
-            <p className="text-[11px] text-[var(--label-3)]">
-              {isAr ? "تنتهي الفترة في: " : "Current period ends: "}
-              {new Date(activeTenant.currentPeriodEnd).toLocaleDateString(isAr ? "ar-EG" : "en-US")}
-            </p>
+            <div className="flex items-center justify-between text-[12px] pt-1">
+              <span className="text-[var(--label-3)]">
+                {isAr ? "ينتهي الاشتراك في: " : "Expires on: "}
+                <strong className="text-[var(--label)]">
+                  {new Date(activeTenant.currentPeriodEnd).toLocaleDateString(isAr ? "ar-EG" : "en-US")}
+                </strong>
+              </span>
+              <span className="font-bold text-[var(--tint)]">
+                {(() => {
+                  const days = getRemainingSubscriptionDays(activeTenant.currentPeriodEnd);
+                  return days > 0
+                    ? isAr
+                      ? `متبقي ${days} يوم`
+                      : `${days} days left`
+                    : isAr
+                      ? "منتهي"
+                      : "Expired";
+                })()}
+              </span>
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-2.5">
             {plans.map((p) => {
               const current = activeTenant.planCode === p.code;
+              const selected = selectedPayPlan === p.code;
               return (
                 <div
                   key={p.code}
-                  className={`p-4 rounded-2xl border space-y-3 ${
-                    current ? "border-[var(--tint)] bg-[var(--tint-soft)]" : "border-[var(--sep)] bg-[var(--surface)]"
+                  className={`p-3.5 rounded-2xl border space-y-2.5 ${
+                    selected
+                      ? "border-[var(--tint)] bg-[var(--tint-soft)]"
+                      : "border-[var(--sep)] bg-[var(--surface)]"
                   }`}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="font-bold text-[15px]">{isAr ? p.nameAr : p.nameEn}</span>
+                    <span className="font-bold text-[14px]">{formatPlanLabel(p.code, lang)}</span>
                     {current && <Check className="w-4 h-4 text-[var(--tint)]" />}
                   </div>
-                  <div className="text-[24px] font-bold">
-                    {p.priceEgp} <span className="text-[13px] font-medium text-[var(--label-3)]">{isAr ? "ج.م" : "EGP"} / {p.billingInterval === "year" ? (isAr ? "سنة" : "yr") : (isAr ? "شهر" : "mo")}</span>
+                  <div className="text-[22px] font-extrabold">
+                    {p.priceEgp}{" "}
+                    <span className="text-[12px] font-medium text-[var(--label-3)]">{isAr ? "ج.م" : "EGP"}</span>
                   </div>
                   {isCloud && isAdmin && (
                     <PillButton
                       type="button"
-                      disabled={busy || (!isSuperAdmin && activeTenant.subscriptionStatus === "suspended" && selectedPayPlan === p.code)}
+                      disabled={busy}
                       onClick={() => void handlePlanSelect(p.code)}
-                      className="w-full h-10 text-[13px]"
+                      className="w-full h-9 text-[12px] justify-center"
                     >
                       {isSuperAdmin
-                        ? current
+                        ? isAr
+                          ? "تفعيل فوري (المالك)"
+                          : "Instant Activate"
+                        : selected
                           ? isAr
-                            ? "تمديد فوري (مالك المنصة)"
-                            : "Instant Renew (Owner)"
+                            ? "محددة للتجديد ✓"
+                            : "Selected ✓"
                           : isAr
-                            ? "تفعيل فوري (مالك المنصة)"
-                            : "Instant Activate (Owner)"
-                        : selectedPayPlan === p.code
-                          ? isAr
-                            ? "محددة للدفع أدناه ✓"
-                            : "Selected Below ✓"
-                          : isAr
-                            ? "اختيار هذه الباقة للدفع"
-                            : "Select Plan to Pay"}
+                            ? "اختيار للتجديد"
+                            : "Select"}
                     </PillButton>
                   )}
                 </div>
@@ -624,26 +669,36 @@ export function TenantSettingsScreen() {
             >
               <div className="font-bold text-[14px]">
                 {isAr
-                  ? "تأكيد الدفع عبر إنستاباي أو فودافون كاش"
-                  : "Manual Payment Confirmation (InstaPay / Vodafone Cash)"}
+                  ? "تجديد الاشتراك ورفع إيصال التحويل (إنستا باي / فودافون كاش)"
+                  : "Renew Subscription & Upload Transfer Proof"}
               </div>
-              <p className="text-[12px] text-[var(--label-2)]">
+              <p className="text-[12px] text-[var(--label-2)] whitespace-pre-line">
                 {billingInfo
                   ? isAr
                     ? billingInfo.instructionsAr
                     : billingInfo.instructionsEn
                   : isAr
-                    ? "حوّل قيمة الباقة المختارة ثم أدخل رقم العملية المرجعي ليعتمدها مالك المنصة."
-                    : "Transfer the plan amount and enter the transaction reference code."}
+                    ? "حوّل قيمة الباقة المختارة ثم أدخل الرقم المحوّل منه أو يوزر إنستا باي وارفع صورة التحويل."
+                    : "Transfer the package amount, enter your sender phone or InstaPay handle, and upload the screenshot."}
               </p>
 
               {(billingInfo?.instapayHandle || billingInfo?.vodafoneCashNumber || billingInfo?.bankDetails) && (
                 <div className="p-3 rounded-xl bg-[var(--fill)] text-[12px] space-y-1 font-mono" dir="ltr">
-                  {billingInfo.instapayHandle && <div>InstaPay: <strong>{billingInfo.instapayHandle}</strong></div>}
-                  {billingInfo.vodafoneCashNumber && (
-                    <div>Vodafone Cash: <strong>{billingInfo.vodafoneCashNumber}</strong></div>
+                  {billingInfo.instapayHandle && (
+                    <div>
+                      InstaPay: <strong>{billingInfo.instapayHandle}</strong>
+                    </div>
                   )}
-                  {billingInfo.bankDetails && <div>Bank: <strong>{billingInfo.bankDetails}</strong></div>}
+                  {billingInfo.vodafoneCashNumber && (
+                    <div>
+                      Vodafone Cash: <strong>{billingInfo.vodafoneCashNumber}</strong>
+                    </div>
+                  )}
+                  {billingInfo.bankDetails && (
+                    <div>
+                      Bank: <strong>{billingInfo.bankDetails}</strong>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -655,7 +710,7 @@ export function TenantSettingsScreen() {
                 >
                   {plans.map((p) => (
                     <option key={p.code} value={p.code}>
-                      {isAr ? p.nameAr : p.nameEn} ({p.priceEgp} {isAr ? "ج.م" : "EGP"})
+                      {formatPlanLabel(p.code, lang)} ({p.priceEgp} {isAr ? "ج.م" : "EGP"})
                     </option>
                   ))}
                 </select>
@@ -664,46 +719,98 @@ export function TenantSettingsScreen() {
                   onChange={(e) => setPayMethod(e.target.value as PaymentMethod)}
                   className="h-10 px-3 rounded-xl bg-[var(--fill)] text-[13px]"
                 >
-                  <option value="instapay">{isAr ? "إنستاباي (InstaPay)" : "InstaPay"}</option>
+                  <option value="instapay">{isAr ? "إنستا باي (InstaPay)" : "InstaPay"}</option>
                   <option value="vodafone_cash">{isAr ? "فودافون كاش (Vodafone Cash)" : "Vodafone Cash"}</option>
-                  <option value="bank_transfer">{isAr ? "تحويل بنكي" : "Bank Transfer"}</option>
                 </select>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                <input
-                  type="text"
-                  dir="ltr"
-                  value={payRefCode}
-                  onChange={(e) => setPayRefCode(e.target.value)}
-                  placeholder={isAr ? "رقم العملية المرجعي *" : "Transaction Reference *"}
-                  className="h-10 px-3 rounded-xl bg-[var(--fill)] text-[13px]"
-                  required
-                />
+              <div className="space-y-1">
+                <label className="text-[12px] font-semibold text-[var(--label-2)] block">
+                  {payMethod === "instapay"
+                    ? isAr
+                      ? "اليوزر نيم على إنستا باي أو الرقم الذي تم منه التحويل *"
+                      : "InstaPay Username or Sender Number *"
+                    : isAr
+                      ? "الرقم الذي تم منه التحويل *"
+                      : "Sender Phone Number *"}
+                </label>
                 <input
                   type="text"
                   dir="ltr"
                   value={paySenderHandle}
                   onChange={(e) => setPaySenderHandle(e.target.value)}
-                  placeholder={isAr ? "رقم المحول أو عنوان IPA (اختياري)" : "Sender phone / IPA (optional)"}
-                  className="h-10 px-3 rounded-xl bg-[var(--fill)] text-[13px]"
+                  placeholder={payMethod === "instapay" ? "username@instapay / 010xxxxxxxx" : "010xxxxxxxx"}
+                  className="w-full h-10 px-3 rounded-xl bg-[var(--fill)] text-[13px] font-mono"
+                  required
                 />
               </div>
 
-              <PillButton type="submit" disabled={busy || !payRefCode.trim()} className="w-full h-10 text-[13px] justify-center">
-                {busy
-                  ? isAr
-                    ? "جارٍ الإرسال..."
-                    : "Submitting..."
-                  : isAr
-                    ? "إرسال طلب تأكيد الدفع للتفعيل"
-                    : "Submit Payment Reference"}
+              <input
+                ref={proofFileRef}
+                type="file"
+                accept="image/*"
+                onChange={(e) => void handleSelectRenewalProof(e)}
+                className="hidden"
+              />
+              {!payProofDataUrl ? (
+                <button
+                  type="button"
+                  disabled={compressingProof}
+                  onClick={() => proofFileRef.current?.click()}
+                  className="w-full py-4 px-3 rounded-2xl border-2 border-dashed border-[var(--sep)] bg-[var(--fill)] flex flex-col items-center gap-1"
+                >
+                  <ImagePlus className="w-6 h-6 text-[var(--tint)]" />
+                  <span className="text-[12px] font-bold">
+                    {compressingProof
+                      ? isAr
+                        ? "جارٍ تجهيز الصورة…"
+                        : "Processing…"
+                      : isAr
+                        ? "ارفع صورة إيصال التحويل *"
+                        : "Upload Transfer Screenshot *"}
+                  </span>
+                </button>
+              ) : (
+                <div className="p-2.5 rounded-2xl bg-[var(--fill)] border border-[var(--tint)] space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-[var(--green)] font-bold flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      {isAr ? "تم إرفاق صورة التحويل" : "Screenshot attached"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => proofFileRef.current?.click()}
+                      className="px-2 py-0.5 rounded bg-[var(--surface)] font-semibold flex items-center gap-1"
+                    >
+                      <Upload className="w-3 h-3" />
+                      {isAr ? "تغيير" : "Replace"}
+                    </button>
+                  </div>
+                  <img src={payProofDataUrl} alt="Transfer proof" className="w-full max-h-40 object-contain rounded-xl" />
+                </div>
+              )}
+
+              <PillButton
+                type="submit"
+                disabled={busy || compressingProof}
+                className="w-full h-11 text-[13px] justify-center"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>
+                  {busy
+                    ? isAr
+                      ? "جارٍ الإرسال..."
+                      : "Submitting..."
+                    : isAr
+                      ? "تم الدفع — إرسال طلب التجديد للمالك"
+                      : "Payment Sent — Submit Renewal"}
+                </span>
               </PillButton>
 
               {paymentRequests.length > 0 && (
                 <div className="pt-2 border-t border-[var(--sep)] space-y-2">
                   <div className="text-[12px] font-semibold text-[var(--label-2)]">
-                    {isAr ? "سجل طلبات التفعيل" : "Payment Requests History"}
+                    {isAr ? "سجل طلبات الاشتراك والتجديد" : "Subscription Requests History"}
                   </div>
                   {paymentRequests.slice(0, 5).map((r) => (
                     <div
@@ -711,10 +818,11 @@ export function TenantSettingsScreen() {
                       className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[var(--fill)] text-[12px]"
                     >
                       <div>
-                        <div className="font-mono font-semibold" dir="ltr">
-                          #{r.referenceCode} · {r.amountEgp} EGP
+                        <div className="font-semibold">
+                          {formatPlanLabel(r.planCode, lang)} · {r.amountEgp} {isAr ? "ج.م" : "EGP"}
                         </div>
-                        <div className="text-[11px] text-[var(--label-3)]">
+                        <div className="text-[11px] text-[var(--label-3)] font-mono" dir="ltr">
+                          {r.senderHandle || r.referenceCode} ·{" "}
                           {new Date(r.createdAt).toLocaleDateString(isAr ? "ar-EG" : "en-US")}
                         </div>
                       </div>

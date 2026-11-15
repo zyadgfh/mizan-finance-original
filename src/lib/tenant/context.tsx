@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import {
   createContext,
   useCallback,
@@ -25,6 +26,7 @@ import { getSupabaseClient } from "../supabase/client.ts";
 import {
   activateTenantPlan,
   createCloudWorkspace,
+  enforceExpiredSubscriptionsNow,
   fetchMyWorkspaceBundle,
   queueOutboxOperations,
   redeemTenantInvite,
@@ -49,7 +51,10 @@ import {
 } from "./storage.ts";
 import {
   canEditWorkspace,
+  DEFAULT_SUBSCRIPTION_PLANS,
+  getSubscriptionAccessBlock,
   type PlanCode,
+  type SubscriptionBlockReason,
   type SubscriptionPlan,
   type SyncRejectedItem,
   type SyncStatus,
@@ -75,6 +80,7 @@ export type TenantContextValue = {
   workspaces: TenantSummary[];
   plans: SubscriptionPlan[];
   activeTenant: TenantSummary | null;
+  subscriptionBlockReason: SubscriptionBlockReason | null;
   canWrite: boolean;
   isOnline: boolean;
   syncStatus: SyncStatus;
@@ -117,10 +123,7 @@ export function useOptionalTenant(): TenantContextValue | null {
   return useContext(TenantContext);
 }
 
-const DEFAULT_PLANS: SubscriptionPlan[] = [
-  { code: "monthly", nameAr: "الخطة الشهرية", nameEn: "Monthly Plan", priceEgp: 19, billingInterval: "month", trialDays: 14, isActive: true },
-  { code: "yearly", nameAr: "الخطة السنوية", nameEn: "Yearly Plan", priceEgp: 149, billingInterval: "year", trialDays: 14, isActive: true },
-];
+const DEFAULT_PLANS: SubscriptionPlan[] = DEFAULT_SUBSCRIPTION_PLANS;
 
 function emptyWorkspaceData(currency: Currency, openingBalance = 0): Data {
   const fresh = seedData();
@@ -200,6 +203,16 @@ export function TenantProvider({
     };
   }, []);
 
+  const [nowTick, setNowTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const timer = window.setInterval(() => {
+      setNowTick(Date.now());
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const activeTenant = useMemo(() => {
     if (!workspaces.length) return null;
     if (requestedSlug) {
@@ -213,7 +226,28 @@ export function TenantProvider({
     return workspaces[0] ?? null;
   }, [workspaces, activeTenantId, requestedSlug]);
 
-  const canWrite = useMemo(() => canEditWorkspace(activeTenant), [activeTenant]);
+  const subscriptionBlockReason = useMemo(
+    () => getSubscriptionAccessBlock(activeTenant, isSuperAdmin, nowTick),
+    [activeTenant, isSuperAdmin, nowTick],
+  );
+
+  const canWrite = useMemo(
+    () => canEditWorkspace(activeTenant, isSuperAdmin, nowTick),
+    [activeTenant, isSuperAdmin, nowTick],
+  );
+
+  // Immediately persist automatic expiration server-side when period ends while app is open
+  useEffect(() => {
+    if (
+      authStatus === "authenticated" &&
+      !initialSession &&
+      isOnline &&
+      subscriptionBlockReason === "expired" &&
+      activeTenant?.subscriptionStatus !== "expired"
+    ) {
+      void enforceExpiredSubscriptionsNow().catch(() => undefined);
+    }
+  }, [authStatus, initialSession, isOnline, subscriptionBlockReason, activeTenant?.subscriptionStatus]);
 
   const syncSpecificTenant = useCallback(
     async (tenant: TenantSummary | null) => {
@@ -265,7 +299,7 @@ export function TenantProvider({
   useEffect(() => {
     if (authStatus !== "authenticated" || !user || !activeTenant) return;
     saveActiveTenantId(activeTenant.id);
-    const editable = canEditWorkspace(activeTenant);
+    const editable = canEditWorkspace(activeTenant, isSuperAdmin, nowTick);
     configureReceiptSyncScope({
       tenantId: activeTenant.id,
       mode: activeTenant.mode,
@@ -296,15 +330,16 @@ export function TenantProvider({
       setPendingOpsCount(0);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authStatus, user?.id, activeTenantKey, activeTenant?.role, activeTenant?.subscriptionStatus]);
+  }, [authStatus, user?.id, activeTenantKey, activeTenant?.role, activeTenant?.subscriptionStatus, subscriptionBlockReason, isSuperAdmin]);
 
-  // Trigger sync on tenant switch or reconnect when online
+  // Trigger sync on tenant switch or reconnect when online (skip if subscription is locked/pending)
   useEffect(() => {
     if (authStatus !== "authenticated" || !activeTenant || activeTenantMode !== "cloud") return;
+    if (subscriptionBlockReason !== null) return;
     if (isOnline && !initialSession) {
       void syncSpecificTenant(activeTenant);
     }
-  }, [authStatus, activeTenantKey, activeTenantMode, isOnline, initialSession, activeTenant, syncSpecificTenant]);
+  }, [authStatus, activeTenantKey, activeTenantMode, isOnline, initialSession, activeTenant, syncSpecificTenant, subscriptionBlockReason]);
 
   const hydrateAuthenticatedUser = useCallback(
     async (authUser: TenantUser) => {
@@ -331,7 +366,7 @@ export function TenantProvider({
         const legacyRaw = typeof localStorage !== "undefined" ? loadLegacyMizanV1Raw(localStorage) : null;
         const legacyParsed = legacyRaw ? asData(legacyRaw) : null;
 
-        if (cloudList.length === 0) {
+        if (cloudList.length === 0 && bundle.isSuperAdmin) {
           const defaultWs = await createCloudWorkspace({
             name: "دفتر ميزان الشخصي",
             kind: "personal",
@@ -746,6 +781,7 @@ export function TenantProvider({
       workspaces,
       plans,
       activeTenant,
+      subscriptionBlockReason,
       canWrite,
       isOnline,
       syncStatus,
@@ -775,6 +811,7 @@ export function TenantProvider({
       workspaces,
       plans,
       activeTenant,
+      subscriptionBlockReason,
       canWrite,
       isOnline,
       syncStatus,

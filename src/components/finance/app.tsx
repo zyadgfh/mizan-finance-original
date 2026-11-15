@@ -84,6 +84,9 @@ import { updateMyPassword } from "@/lib/tenant/api";
 import { formatRoleLabel } from "@/lib/tenant/types";
 
 const AuthScreen = lazy(() => import("@/components/finance/auth-screen").then((m) => ({ default: m.AuthScreen })));
+const SubscriptionGateScreen = lazy(() =>
+  import("@/components/finance/subscription-gate-screen").then((m) => ({ default: m.SubscriptionGateScreen })),
+);
 const WorkspaceSwitcherSheet = lazy(() =>
   import("@/components/finance/workspace-switcher").then((m) => ({ default: m.WorkspaceSwitcherSheet })),
 );
@@ -203,7 +206,8 @@ function TenantAuthGate({
   requestedInviteCode?: string;
   initialRoute?: Route;
 }) {
-  const { authStatus, activeTenant, passwordRecoveryPending, clearPasswordRecovery } = useTenant();
+  const { authStatus, activeTenant, subscriptionBlockReason, passwordRecoveryPending, clearPasswordRecovery } =
+    useTenant();
   const { lang, dir } = useI18n();
   const [showSplash, setShowSplash] = useState(!skipSplash);
   const [newRecoveryPass, setNewRecoveryPass] = useState("");
@@ -249,6 +253,10 @@ function TenantAuthGate({
       ) : authStatus === "unauthenticated" || !activeTenant ? (
         <Suspense fallback={<ScreenFallback />}>
           <AuthScreen initialInviteCode={requestedInviteCode} />
+        </Suspense>
+      ) : subscriptionBlockReason ? (
+        <Suspense fallback={<ScreenFallback />}>
+          <SubscriptionGateScreen reason={subscriptionBlockReason} />
         </Suspense>
       ) : (
         <App initialRoute={initialRoute} />
