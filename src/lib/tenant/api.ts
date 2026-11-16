@@ -1,6 +1,6 @@
 import { getSupabaseClient, SUPABASE_ANON_KEY, SUPABASE_URL } from "../supabase/client.ts";
 import type { Currency, Data } from "../finance/types.ts";
-import { validateEntityPayload } from "./entity-payloads.ts";
+import { splitRemoteRecords, validateEntityPayload } from "./entity-payloads.ts";
 import { cleanDisplayContact, normalizeSubscriberIdentity } from "./identity.ts";
 import {
   enqueueTenantOutboxOps,
@@ -817,8 +817,21 @@ export async function syncTenantWithSupabase(
   if (pullErr) throw new Error(pullErr.message);
 
   const rows = (remoteRows ?? []) as RemoteTenantRecord[];
+  // Server data is validated too: a malformed or mis-keyed row is reported and
+  // skipped instead of being merged into the workspace.
+  const { valid: mergeableRows, invalid: invalidRows } = splitRemoteRecords(rows);
+  for (const { row, error } of invalidRows) {
+    rejected.push({
+      entityType: String(row.entity_type),
+      entityId: String(row.entity_id),
+      error,
+      code: "INVALID_REMOTE_PAYLOAD",
+      at: Date.now(),
+    });
+  }
+
   const remainingOutbox = loadTenantOutbox(tenantId, storage);
-  const mergedData = mergeRemoteRecordsIntoData(localData, rows, remainingOutbox);
+  const mergedData = mergeRemoteRecordsIntoData(localData, mergeableRows, remainingOutbox);
 
   if (rows.length > 0) {
     const maxServerTs = rows[rows.length - 1]?.server_updated_at;

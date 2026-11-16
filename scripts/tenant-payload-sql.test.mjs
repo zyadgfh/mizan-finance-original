@@ -21,6 +21,7 @@ const migrationFiles = [
   "20261116045649_tenant_payload_validation.sql",
   "20261116045728_tenant_payload_error_grant.sql",
   "20261116050147_tenant_payload_rules_refined.sql",
+  "20261116051240_tenant_record_id_integrity.sql",
 ];
 
 const USER_ID = "11111111-1111-1111-1111-111111111111";
@@ -273,6 +274,49 @@ test("tombstones skip payload validation and remove the record", async () => {
     ["w-push"],
   );
   assert.equal(rows[0].deleted_at_ms, 1_700_000_000_010);
+});
+
+test("the push RPC rejects a record filed under a mismatched key", async () => {
+  const result = await push([
+    {
+      entityType: "tx",
+      entityId: "t-mismatch",
+      payload: { ...validPayloads.tx, id: "t-other" },
+      updatedAtMs: 1_700_000_000_020,
+      deletedAtMs: null,
+    },
+  ]);
+  assert.deepEqual(result.applied, []);
+  assert.equal(result.rejected[0].code, "INVALID_PAYLOAD");
+  assert.equal(result.rejected[0].error, "entityId does not match the payload identifier");
+
+  const { rows } = await db.query("select 1 from public.tenant_records where entity_id = $1", ["t-mismatch"]);
+  assert.equal(rows.length, 0);
+});
+
+test("budgets are keyed by categoryId, not id", async () => {
+  const applied = await push([
+    {
+      entityType: "budget",
+      entityId: "food",
+      payload: { categoryId: "food", limit: 500 },
+      updatedAtMs: 1_700_000_000_030,
+      deletedAtMs: null,
+    },
+  ]);
+  assert.deepEqual(applied.applied, [{ entityType: "budget", entityId: "food" }]);
+
+  const mismatched = await push([
+    {
+      entityType: "budget",
+      entityId: "bills",
+      payload: { categoryId: "food", limit: 500 },
+      updatedAtMs: 1_700_000_000_031,
+      deletedAtMs: null,
+    },
+  ]);
+  assert.deepEqual(mismatched.applied, []);
+  assert.equal(mismatched.rejected[0].error, "entityId does not match the payload identifier");
 });
 
 test("an older write is reported stale instead of overwriting", async () => {

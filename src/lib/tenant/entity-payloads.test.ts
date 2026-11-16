@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { seedData } from "../finance/seed.ts";
-import { validateEntityPayload } from "./entity-payloads.ts";
+import { splitRemoteRecords, validateEntityPayload } from "./entity-payloads.ts";
 import { snapshotToOutboxOps } from "./storage.ts";
 import type { EntityType } from "./types.ts";
 
@@ -144,6 +144,38 @@ test("empty free text is accepted, as the app stores it", () => {
     const result = validateEntityPayload(entityType, payload);
     assert.equal(result.ok, true, `${entityType}: ${result.ok ? "" : result.error}`);
   }
+});
+
+test("a record stored under a key that disagrees with its payload is rejected", () => {
+  const mismatch = validateEntityPayload("tx", { ...VALID.tx, id: "t-9" }, "t-8");
+  assert.equal(mismatch.ok, false);
+  assert.match(mismatch.ok === false ? mismatch.error : "", /stored under "t-8" but the payload identifier is "t-9"/);
+
+  assert.equal(validateEntityPayload("tx", VALID.tx, "t-1").ok, true);
+  // Budgets are keyed by categoryId and carry no id.
+  assert.equal(validateEntityPayload("budget", VALID.budget, "food").ok, true);
+  assert.equal(validateEntityPayload("budget", VALID.budget, "bills").ok, false);
+});
+
+test("pulled rows are split into mergeable and reported records", () => {
+  const base = { server_updated_at: "2026-11-16T00:00:00Z" };
+  const rows = [
+    { ...base, entity_type: "person", entity_id: "p-1", payload: { ...VALID.person, id: "p-1" }, deleted_at_ms: null },
+    { ...base, entity_type: "tx", entity_id: "t-2", payload: { ...VALID.tx, id: "t-2" }, deleted_at_ms: null },
+    { ...base, entity_type: "tx", entity_id: "t-3", payload: { ...VALID.tx, id: "t-3", amount: "12" }, deleted_at_ms: null },
+    { ...base, entity_type: "debt", entity_id: "d-1", payload: { ...VALID.debt, id: "d-2" }, deleted_at_ms: null },
+    // A tombstone only deletes a local record; its payload is never merged.
+    { ...base, entity_type: "wallet", entity_id: "w-1", payload: {}, deleted_at_ms: 1_700_000_000_000 },
+    // Unknown types are ignored by the merge itself, so they are not errors.
+    { ...base, entity_type: "futureThing", entity_id: "x-1", payload: {}, deleted_at_ms: null },
+  ];
+
+  const { valid, invalid } = splitRemoteRecords(rows);
+  assert.deepEqual(valid.map((row) => row.entity_id), ["p-1", "t-2", "w-1", "x-1"]);
+  assert.deepEqual(invalid.map((entry) => entry.row.entity_id), ["t-3", "d-1"]);
+  assert.match(invalid[0].error, /^tx\.amount:/);
+  assert.match(invalid[1].error, /payload identifier is "d-2"/);
+  assert.equal(valid.length + invalid.length, rows.length);
 });
 
 test("an unknown entity type is rejected instead of passed through", () => {
