@@ -78,7 +78,7 @@ language sql
 immutable
 set search_path = public
 as $$
-  select encode(digest(coalesce(p_value, ''), 'sha256'), 'hex');
+  select encode(extensions.digest(coalesce(p_value, ''), 'sha256'), 'hex');
 $$;
 
 revoke all on function public.hash_bucket(text) from public, anon, authenticated;
@@ -754,6 +754,13 @@ grant execute on function public.log_tenant_audit_event(uuid, text, text, text, 
 -- -----------------------------------------------------------------------------
 -- 6. FINDING 06 — trials come from the plan; workspace creation is quota-limited
 -- -----------------------------------------------------------------------------
+-- Behaviour preservation: the legacy implementation hardcoded a 14-day trial
+-- while the plan rows carried trial_days = 0. Make the data match the observed
+-- behaviour first, otherwise every new signup lands on a zero-length period.
+update public.subscription_plans
+set trial_days = 14, updated_at = now()
+where coalesce(trial_days, 0) = 0;
+
 create or replace function public.create_tenant_workspace(
   p_name text,
   p_slug text default null,
@@ -1292,3 +1299,14 @@ grant execute on function public.admin_list_tenants() to authenticated;
 grant execute on function public.admin_update_tenant_subscription(uuid, text, text, integer, timestamptz) to authenticated;
 grant execute on function public.activate_tenant_subscription(uuid, text) to authenticated;
 grant execute on function public.submit_payment_request(uuid, text, text, text, text, text, text) to authenticated;
+
+-- anon parity: several RLS policies are declared `to public`, so the anon role
+-- evaluates these predicates. Revoking EXECUTE from anon converts an empty result
+-- set into a hard 42501 error during pre-auth page loads. Grant it back
+-- explicitly (for anon every predicate resolves to false) while PUBLIC stays
+-- revoked.
+grant execute on function public.is_super_admin() to anon;
+grant execute on function public.tenant_role(uuid) to anon;
+grant execute on function public.is_tenant_member(uuid) to anon;
+grant execute on function public.can_write_tenant(uuid) to anon;
+grant execute on function public.is_tenant_admin(uuid) to anon;
