@@ -12,7 +12,7 @@ import { PillButton, Section, Segment, Sheet } from "@/components/finance/ui";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/finance/i18n";
 import { GOAL_CATEGORY_LABEL, goalSaved, remaining, round2, todayISO, walletBalance } from "@/lib/finance/logic";
-import { hashPin } from "@/lib/finance/pin";
+import { clearPinFailures, hashPin, pinLockoutRemainingMs, recordPinFailure, verifyPin } from "@/lib/finance/pin";
 import { useFinance } from "@/lib/finance/store";
 import type { GoalCategory, TxKind, WalletCardDesign, WalletKind } from "@/lib/finance/types";
 
@@ -857,17 +857,33 @@ export function PinForm() {
   const [next, setNext] = useState("");
   const [again, setAgain] = useState("");
 
+  function registerFailedPinAttempt() {
+    const delayMs = recordPinFailure();
+    if (delayMs > 0) toast(`محاولات كثيرة — انتظر ${Math.ceil(delayMs / 1000)} ثانية`);
+  }
+
+  async function rejectIfLocked() {
+    const remaining = pinLockoutRemainingMs();
+    if (remaining <= 0) return false;
+    toast(`محاولات كثيرة — انتظر ${Math.ceil(remaining / 1000)} ثانية`);
+    return true;
+  }
+
   async function save() {
     if (!/^\d{4}$/.test(next) || next !== again) {
       toast("اكتب رمزاً من 4 أرقام مرتين بنفس الشكل");
       return;
     }
+    if (await rejectIfLocked()) return;
     if (pinHash) {
-      if ((await hashPin(current)) !== pinHash) {
+      const check = await verifyPin(current, pinHash);
+      if (!check.ok) {
+        registerFailedPinAttempt();
         toast("الرمز الحالي غير صحيح");
         return;
       }
     }
+    clearPinFailures();
     const hashed = await hashPin(next);
     setPinHash(hashed);
     toast("تم حفظ الرمز");
@@ -876,10 +892,14 @@ export function PinForm() {
 
   async function clear() {
     if (!pinHash) return;
-    if ((await hashPin(current)) !== pinHash) {
+    if (await rejectIfLocked()) return;
+    const check = await verifyPin(current, pinHash);
+    if (!check.ok) {
+      registerFailedPinAttempt();
       toast("الرمز الحالي غير صحيح");
       return;
     }
+    clearPinFailures();
     setPinHash(null);
     toast("أُلغي القفل");
     closeSheet();

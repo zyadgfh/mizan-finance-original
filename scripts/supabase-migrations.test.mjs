@@ -1,0 +1,351 @@
+/**
+ * Database-level regression tests for the security hardening migration.
+ *
+ * The migrations are applied to an embedded PostgreSQL (PGlite) with the
+ * minimum Supabase scaffolding (anon/authenticated/service_role roles,
+ * auth.users, auth.uid(), storage.objects and Supabase's default grants), then
+ * the audit invariants are asserted as the actual client roles.
+ *
+ * This is what proves findings 02/03/04/05/07/08/10/12 are fixed in SQL rather
+ * than only in the TypeScript layer.
+ */
+import assert from "node:assert/strict";
+import test from "node:test";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const OWNER = "11111111-1111-1111-1111-111111111111";
+const MEMBER = "22222222-2222-2222-2222-222222222222";
+const OUTSIDER = "33333333-3333-3333-3333-333333333333";
+
+const bootstrapSql = `
+  set check_function_bodies = off;
+
+  create role anon nologin;
+  create role authenticated nologin;
+  create role service_role nologin bypassrls;
+
+  create schema if not exists auth;
+  grant usage on schema auth to anon, authenticated, service_role;
+  create or replace function auth.uid() returns uuid
+    language sql stable as $$ select nullif(current_setting('test.uid', true), '')::uuid $$;
+  create or replace function auth.role() returns text
+    language sql stable as $$ select coalesce(nullif(current_setting('test.role', true), ''), 'authenticated') $$;
+  create or replace function auth.jwt() returns jsonb
+    language sql stable as $$ select '{}'::jsonb $$;
+  create table if not exists auth.users (
+    id uuid primary key,
+    email text,
+    email_confirmed_at timestamptz,
+    raw_user_meta_data jsonb default '{}'::jsonb,
+    banned_until timestamptz,
+    created_at timestamptz default now()
+  );
+
+  create schema if not exists storage;
+  create table if not exists storage.buckets (
+    id text primary key,
+    name text not null,
+    public boolean default false,
+    file_size_limit bigint,
+    allowed_mime_types text[]
+  );
+  create table if not exists storage.objects (
+    id uuid primary key default gen_random_uuid(),
+    bucket_id text references storage.buckets(id),
+    name text,
+    owner uuid
+  );
+  alter table storage.objects enable row level security;
+
+  -- Supabase grants every new object to the API roles by default; the hardening
+  -- migration then revokes what clients must not have.
+  grant usage on schema public to anon, authenticated, service_role;
+  alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+  alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
+  alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+`;
+
+const { PGlite } = await import("@electric-sql/pglite");
+const db = new PGlite();
+await db.exec(bootstrapSql);
+
+const migrationFiles = (await readdir("supabase/migrations"))
+  .filter((file) => file.endsWith(".sql"))
+  .sort();
+
+for (const file of migrationFiles) {
+  const sql = (await readFile(join("supabase/migrations", file), "utf8")).replace(
+    /create\s+extension\s+if\s+not\s+exists\s+pgcrypto;/gi,
+    ";",
+  );
+  await db.exec(sql);
+}
+
+const one = async (sql, params) => (await db.query(sql, params)).rows[0];
+const exec = (sql, params) => db.query(sql, params);
+
+async function actAs(uid) {
+  await db.exec(
+    `select set_config('test.uid', ${uid ? `'${uid}'` : "''"}, false), set_config('test.role', 'authenticated', false)`,
+  );
+  await db.exec("set role authenticated");
+}
+
+async function actAsSystem() {
+  await db.exec("reset role");
+  await db.exec("select set_config('test.uid', '', false)");
+}
+
+async function rejects(fn, pattern) {
+  try {
+    await fn();
+  } catch (err) {
+    assert.match(String(err.message ?? err), pattern);
+    return;
+  }
+  assert.fail("expected the statement to be rejected");
+}
+
+await exec(
+  `insert into auth.users (id, email, email_confirmed_at, raw_user_meta_data) values
+     ($1, 'owner@example.com', now(), '{"display_name":"Owner"}'::jsonb),
+     ($2, 'member@example.com', now(), '{"display_name":"Member"}'::jsonb),
+     ($3, 'outsider@example.com', now(), '{"display_name":"Outsider"}'::jsonb)`,
+  [OWNER, MEMBER, OUTSIDER],
+);
+await exec(`update public.platform_settings set owner_email = 'owner@example.com' where id = 1`);
+
+let tenant;
+
+test("migrations apply to a Supabase-shaped database", () => {
+  assert.ok(migrationFiles.length >= 5);
+  assert.ok(migrationFiles.includes("202611160001_security_hardening.sql"));
+});
+
+test("profiles.email can never diverge from the verified auth identity", async () => {
+  await exec(`update public.profiles set email = 'attacker@evil.test' where id = $1`, [OWNER]);
+  assert.equal((await one(`select email from profiles where id = $1`, [OWNER])).email, "owner@example.com");
+
+  // Direct REST-style update of the identity column is denied outright.
+  await actAs(OWNER);
+  await rejects(
+    () => exec(`update public.profiles set email = 'attacker@evil.test' where id = $1`, [OWNER]),
+    /permission denied/,
+  );
+  await actAsSystem();
+});
+
+test("workspace creation is trial-aware, verified-email-only and quota-limited", async () => {
+  await actAs(OWNER);
+  tenant = await one(`select * from create_tenant_workspace('Test WS', 'test-ws', 'personal', 'EGP', 'monthly')`);
+  assert.equal(tenant.subscription_status, "pending_approval", "plans with trial_days=0 must not grant a trial");
+  await actAsSystem();
+
+  await exec(`update auth.users set email_confirmed_at = null where id = $1`, [MEMBER]);
+  await actAs(MEMBER);
+  await rejects(() => one(`select create_tenant_workspace('Unverified')`), /تأكيد البريد/);
+  await actAsSystem();
+  await exec(`update auth.users set email_confirmed_at = now() where id = $1`, [MEMBER]);
+
+  await actAs(OWNER);
+  for (let i = 0; i < 4; i += 1) {
+    await one(`select create_tenant_workspace($1)`, [`WS ${i}`]);
+  }
+  await rejects(() => one(`select create_tenant_workspace('Too many')`), /الحد الأقصى/);
+  await actAsSystem();
+});
+
+test("invites are bound to the verified auth email, not the profile copy", async () => {
+  await exec(
+    `insert into tenant_invites (tenant_id, invite_code, email, role, created_by, max_uses)
+     values ($1, 'JOIN-OK', 'member@example.com', 'member', $2, 5),
+            ($1, 'JOIN-OTHER', 'someone@else.test', 'member', $2, 5)`,
+    [tenant.id, OWNER],
+  );
+
+  // Tampering with profiles.email must not unlock somebody else's invitation.
+  await exec(`update public.profiles set email = 'someone@else.test' where id = $1`, [MEMBER]);
+  await actAs(MEMBER);
+  await rejects(() => one(`select redeem_tenant_invite('JOIN-OTHER')`), /بريد إلكتروني آخر/);
+  const joined = await one(`select redeem_tenant_invite('JOIN-OK') as r`);
+  assert.equal(joined.r.role, "member");
+  await actAsSystem();
+
+  // Unverified identities cannot consume invitations at all.
+  await exec(`update auth.users set email_confirmed_at = null where id = $1`, [OUTSIDER]);
+  await actAs(OUTSIDER);
+  await rejects(() => one(`select redeem_tenant_invite('JOIN-OK')`), /تأكيد البريد/);
+  await actAsSystem();
+  await exec(`update auth.users set email_confirmed_at = now() where id = $1`, [OUTSIDER]);
+});
+
+test("rate limiting is a database-enforced fixed window", async () => {
+  assert.equal((await one(`select check_rate_limit('unit', 'b', 2, 60) as ok`)).ok, true);
+  assert.equal((await one(`select check_rate_limit('unit', 'b', 2, 60) as ok`)).ok, true);
+  assert.equal((await one(`select check_rate_limit('unit', 'b', 2, 60) as ok`)).ok, false);
+  assert.equal((await one(`select check_rate_limit('unit', 'b', 0, 60) as ok`)).ok, false);
+});
+
+test("payment requests are server-priced and client-insert-proof", async () => {
+  await actAs(OWNER);
+  await rejects(
+    () =>
+      exec(
+        `insert into payment_requests (tenant_id, tenant_name, submitted_by, submitter_email, plan_code, amount_egp, payment_method, reference_code, duration_days)
+         values ($1, 'T', $2, 'owner@example.com', 'yearly', 1, 'instapay', 'REF-1', 365)`,
+        [tenant.id, OWNER],
+      ),
+    /permission denied/,
+  );
+  await actAsSystem();
+
+  const plan = await one(`select price_egp, duration_days from subscription_plans where code = 'yearly'`);
+  const request = await one(
+    `insert into payment_requests (tenant_id, tenant_name, submitted_by, submitter_email, plan_code, amount_egp, payment_method, reference_code, duration_days, status, reviewed_by)
+     values ($1, 'Test WS', $2, 'owner@example.com', 'yearly', 1, 'instapay', 'REF-2', 1, 'pending', $2)
+     returning *`,
+    [tenant.id, OWNER],
+  );
+  assert.equal(Number(request.amount_egp), Number(plan.price_egp), "amount must come from the plan");
+  assert.equal(request.duration_days, plan.duration_days, "duration must come from the plan");
+});
+
+test("sync order is revision-based and client clock cannot poison it", async () => {
+  await exec(`update tenants set subscription_status = 'active', current_period_end = now() + interval '30 days' where id = $1`, [
+    tenant.id,
+  ]);
+
+  await actAs(OWNER);
+  const future = Date.now() + 1000 * 60 * 60 * 24 * 3650;
+  const first = await one(`select sync_push_tenant_records($1, $2::jsonb) as r`, [
+    tenant.id,
+    JSON.stringify([{ entityType: "tx", entityId: "tx-1", payload: { id: "tx-1", amount: 10 }, updatedAtMs: future }]),
+  ]);
+  assert.equal(first.r.applied.length, 1);
+
+  const stored = await one(`select updated_at_ms, revision from tenant_records where entity_id = 'tx-1'`);
+  assert.ok(Number(stored.updated_at_ms) < Date.now() + 60_000, "far-future client timestamps are clamped");
+
+  // A genuine later edit from another device still wins.
+  const second = await one(`select sync_push_tenant_records($1, $2::jsonb) as r`, [
+    tenant.id,
+    JSON.stringify([{ entityType: "tx", entityId: "tx-1", payload: { id: "tx-1", amount: 20 }, updatedAtMs: Date.now() + 1000 }]),
+  ]);
+  assert.equal(second.r.applied.length, 1);
+  const updated = await one(`select revision from tenant_records where entity_id = 'tx-1'`);
+  assert.ok(Number(updated.revision) > Number(stored.revision), "every write gets a fresh monotonic revision");
+
+  const invalid = await one(`select sync_push_tenant_records($1, $2::jsonb) as r`, [
+    tenant.id,
+    JSON.stringify([
+      { entityType: "hacked", entityId: "x", payload: {}, updatedAtMs: 1 },
+      { entityType: "tx", entityId: "tx-2", payload: [], updatedAtMs: 1 },
+      { entityType: "tx", entityId: "tx-3", payload: { a: 1 }, updatedAtMs: "not-a-number" },
+    ]),
+  ]);
+  assert.deepEqual(
+    invalid.r.rejected.map((row) => row.code),
+    ["ENTITY_TYPE_INVALID", "PAYLOAD_INVALID", "TIMESTAMP_INVALID"],
+  );
+  await rejects(
+    () => one(`select sync_push_tenant_records($1, $2::jsonb)`, [tenant.id, JSON.stringify(new Array(201).fill({}))]),
+    /الحد المسموح/,
+  );
+  await actAsSystem();
+
+  // A non-member cannot write into the workspace.
+  await actAs(OUTSIDER);
+  await rejects(
+    () =>
+      one(`select sync_push_tenant_records($1, $2::jsonb)`, [
+        tenant.id,
+        JSON.stringify([{ entityType: "tx", entityId: "evil", payload: {}, updatedAtMs: Date.now() }]),
+      ]),
+    /صلاحية الكتابة/,
+  );
+  await actAsSystem();
+});
+
+test("deletes are tombstones only (no hard delete from clients)", async () => {
+  await actAs(OWNER);
+  await rejects(() => exec(`delete from tenant_records where entity_id = 'tx-1'`), /permission denied/);
+
+  const result = await one(`select sync_push_tenant_records($1, $2::jsonb) as r`, [
+    tenant.id,
+    JSON.stringify([
+      {
+        entityType: "tx",
+        entityId: "tx-1",
+        payload: { id: "tx-1" },
+        updatedAtMs: Date.now() + 2000,
+        deletedAtMs: Date.now() + 2000,
+      },
+    ]),
+  ]);
+  assert.equal(result.r.applied.length, 1);
+  assert.equal((await one(`select deleted_at_ms is not null as d from tenant_records where entity_id = 'tx-1'`)).d, true);
+
+  assert.equal((await one(`select soft_delete_tenant_record($1, 'tx', 'tx-1') as ok`, [tenant.id])).ok, false);
+  const audit = await one(`select count(*)::int c from tenant_audit_logs where action = 'record.deleted'`);
+  assert.equal(audit.c, 0, "deleting an already-deleted record writes no new audit row");
+  await actAsSystem();
+});
+
+test("audit logs are server-authored, allow-listed and immutable", async () => {
+  await actAs(OWNER);
+  await rejects(
+    () =>
+      exec(
+        `insert into tenant_audit_logs (tenant_id, actor_id, actor_name, action, summary)
+         values ($1, $2, 'Super-Admin', 'billing.payment_approved', 'forged')`,
+        [tenant.id, OWNER],
+      ),
+    /permission denied/,
+  );
+  await rejects(() => one(`select log_tenant_audit_event($1, 'evil.action', 'x')`, [tenant.id]), /غير مسموح/);
+  await one(`select log_tenant_audit_event($1, 'record.created', 'إضافة حركة')`, [tenant.id]);
+
+  const entry = await one(`select actor_id, actor_name from tenant_audit_logs where action = 'record.created'`);
+  assert.equal(entry.actor_id, OWNER, "actor id comes from the session, not the payload");
+  assert.equal(entry.actor_name, "Owner");
+
+  await rejects(() => exec(`update tenant_audit_logs set summary = 'tampered'`), /permission denied/);
+  await rejects(() => exec(`delete from tenant_audit_logs`), /permission denied/);
+  await actAsSystem();
+});
+
+test("expiration sweep is a system job, not a client endpoint", async () => {
+  await actAs(MEMBER);
+  await rejects(() => exec(`select enforce_expired_subscriptions()`), /permission denied/);
+  assert.equal((await one(`select bootstrap_first_super_admin() as ok`)).ok, false, "no implicit promotion");
+  await actAsSystem();
+});
+
+test("platform owner bootstrap is atomic, single-use and secret-gated", async () => {
+  assert.equal((await one(`select claim_platform_owner($1, 'attacker@evil.test') as ok`, [MEMBER])).ok, false);
+  assert.equal((await one(`select claim_platform_owner($1, 'owner@example.com') as ok`, [OWNER])).ok, true);
+  assert.equal(
+    (await one(`select claim_platform_owner($1, 'owner@example.com') as ok`, [MEMBER])).ok,
+    false,
+    "a second claim must fail even with the right email",
+  );
+  assert.equal((await one(`select count(*)::int c from platform_admins`)).c, 1);
+
+  // Clients cannot call the bootstrap helper directly.
+  await actAs(OWNER);
+  await rejects(() => exec(`select claim_platform_owner($1, 'owner@example.com')`, [OWNER]), /permission denied/);
+  await actAsSystem();
+});
+
+test("helper functions are not executable by anon", async () => {
+  await db.exec("set role anon");
+  await rejects(() => exec(`select can_write_tenant($1)`, [tenant.id]), /permission denied/);
+  await rejects(() => exec(`select enforce_expired_subscriptions()`), /permission denied/);
+  assert.equal((await one(`select has_platform_owner() as ok`)).ok, true, "public bootstrap check stays available");
+  await actAsSystem();
+});
+
+test("cleanup", async () => {
+  await db.close();
+});

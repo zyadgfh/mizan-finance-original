@@ -112,6 +112,16 @@ function mapPaymentRequestRow(r: Record<string, unknown>): PaymentRequestItem {
   };
 }
 
+/** Raised when the credentials are valid but the mailbox was never confirmed. */
+export class EmailNotVerifiedError extends Error {
+  readonly identifier: string;
+  constructor(identifier: string) {
+    super("يجب تأكيد بريدك الإلكتروني أولاً. تحقق من رسالة التأكيد أو أرسل رابطاً جديداً.");
+    this.name = "EmailNotVerifiedError";
+    this.identifier = identifier;
+  }
+}
+
 export async function signInWithEmailPassword(identifier: string, password: string): Promise<TenantUser> {
   const normalized = normalizeSubscriberIdentity(identifier);
   if (!normalized) {
@@ -129,6 +139,9 @@ export async function signInWithEmailPassword(identifier: string, password: stri
     }
     if (lower.includes("banned")) {
       throw new Error("هذا الحساب موقوف حالياً، يرجى التواصل مع مالك المنصة");
+    }
+    if (lower.includes("not confirmed") || lower.includes("email not confirmed")) {
+      throw new EmailNotVerifiedError(identifier);
     }
     throw new Error(error.message);
   }
@@ -197,21 +210,40 @@ async function callAdminUsersFunction(
   return json;
 }
 
+export type SignupPendingVerification = {
+  requiresEmailVerification: true;
+  verificationEmailSent: boolean;
+  authEmail: string;
+  contactDisplay: string;
+};
+
+/**
+ * One-time platform owner bootstrap. Requires the server-side
+ * MIZAN_BOOTSTRAP_SECRET; the account is never auto-confirmed, so the owner
+ * has to verify the mailbox before signing in.
+ */
 export async function setupInitialPlatformOwner(input: {
   email: string;
   password: string;
   displayName?: string;
-}): Promise<TenantUser> {
-  await callAdminUsersFunction(
+  bootstrapSecret: string;
+}): Promise<SignupPendingVerification> {
+  const res = await callAdminUsersFunction(
     {
       action: "setup_owner",
       email: input.email.trim(),
       password: input.password,
       displayName: input.displayName?.trim() || "مالك المنصة",
+      bootstrapSecret: input.bootstrapSecret,
     },
     false,
   );
-  return signInWithEmailPassword(input.email, input.password);
+  return {
+    requiresEmailVerification: true,
+    verificationEmailSent: Boolean(res.verificationEmailSent),
+    authEmail: String(res.email ?? input.email.trim().toLowerCase()),
+    contactDisplay: String(res.email ?? input.email.trim().toLowerCase()),
+  };
 }
 
 export async function fetchPublicSignupConfig(): Promise<{
@@ -245,8 +277,10 @@ export async function registerNewSubscriberWithPayment(input: {
   senderHandle: string;
   proofDataUrl: string;
   notes?: string;
-}): Promise<TenantUser> {
-  await callAdminUsersFunction(
+  /** Required when the identifier is a phone number: used to verify the account. */
+  email?: string;
+}): Promise<SignupPendingVerification> {
+  const res = await callAdminUsersFunction(
     {
       action: "register_subscriber",
       identifier: input.identifier.trim(),
@@ -257,11 +291,41 @@ export async function registerNewSubscriberWithPayment(input: {
       senderHandle: input.senderHandle.trim(),
       proofDataUrl: input.proofDataUrl,
       notes: input.notes?.trim() || "",
+      email: input.email?.trim() || "",
     },
     false,
   );
 
-  return signInWithEmailPassword(input.identifier, input.password);
+  return {
+    requiresEmailVerification: true,
+    verificationEmailSent: Boolean(res.verificationEmailSent),
+    authEmail: String(res.authEmail ?? ""),
+    contactDisplay: String(res.contactDisplay ?? input.identifier.trim()),
+  };
+}
+
+/**
+ * Re-sends the signup confirmation email. Used when a subscriber tries to sign
+ * in before confirming the mailbox.
+ */
+export async function resendSignupVerification(identifier: string, redirectTo?: string): Promise<void> {
+  const normalized = normalizeSubscriberIdentity(identifier);
+  if (!normalized) {
+    throw new Error("أدخل بريداً إلكترونياً صحيحاً أو رقم هاتف صحيح");
+  }
+  if (normalized.kind !== "email") {
+    throw new Error("تأكيد الحساب يتم عبر البريد الإلكتروني المسجل عند التسجيل");
+  }
+  const sb = getSupabaseClient();
+  const target =
+    redirectTo ||
+    (typeof window !== "undefined" ? `${window.location.origin}/` : "https://mizan-finance-rho.vercel.app/");
+  const { error } = await sb.auth.resend({
+    type: "signup",
+    email: normalized.authEmail,
+    options: { emailRedirectTo: target },
+  });
+  if (error) throw new Error(error.message);
 }
 
 export async function submitRenewalPaymentWithProof(input: {
@@ -299,7 +363,9 @@ export async function getPaymentProofSignedUrl(proofPath: string): Promise<strin
 
 export async function enforceExpiredSubscriptionsNow(): Promise<number> {
   const sb = getSupabaseClient();
-  const { data, error } = await sb.rpc("enforce_expired_subscriptions");
+  // The sweep is no longer executable by anon/authenticated; platform admins
+  // call the guarded wrapper instead.
+  const { data, error } = await sb.rpc("admin_enforce_expired_subscriptions");
   if (error) throw new Error(error.message);
   return Number(data ?? 0);
 }
@@ -698,25 +764,43 @@ export async function fetchTenantAuditLogs(tenantId: string, limit = 50): Promis
   }));
 }
 
+/**
+ * Writes an audit entry. The actor id/name and timestamp are derived on the
+ * server (`log_tenant_audit_event`); the client only supplies the tenant, an
+ * allow-listed action and a short summary, so entries cannot be forged.
+ */
 export async function pushTenantAuditLog(input: {
   tenantId: string;
-  actorId: string;
-  actorName: string;
   action: string;
   summary: string;
   entityType?: string;
   entityId?: string;
+  /** @deprecated ignored — the server always uses the authenticated actor. */
+  actorId?: string;
+  /** @deprecated ignored — the server always uses the authenticated actor. */
+  actorName?: string;
 }): Promise<void> {
   const sb = getSupabaseClient();
-  await sb.from("tenant_audit_logs").insert({
-    tenant_id: input.tenantId,
-    actor_id: input.actorId,
-    actor_name: input.actorName,
-    action: input.action,
-    summary: input.summary,
-    entity_type: input.entityType ?? null,
-    entity_id: input.entityId ?? null,
+  const { error } = await sb.rpc("log_tenant_audit_event", {
+    p_tenant_id: input.tenantId,
+    p_action: input.action,
+    p_summary: input.summary,
+    p_entity_type: input.entityType ?? null,
+    p_entity_id: input.entityId ?? null,
   });
+  if (error) throw new Error(error.message);
+}
+
+const SYNC_PAGE_SIZE = 500;
+const SYNC_MAX_PAGES = 40;
+
+/** Cursor format: `rev:<n>` — a monotonic, server-assigned revision. */
+function parseRevisionCursor(cursor: string | null): number | null {
+  if (!cursor) return null;
+  const match = /^rev:(\d+)$/.exec(cursor.trim());
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 export async function syncTenantWithSupabase(
@@ -773,29 +857,62 @@ export async function syncTenantWithSupabase(
     saveTenantOutbox(tenantId, remaining, storage);
   }
 
-  const cursorIso = loadTenantSyncCursor(tenantId, storage);
-  let query = sb
-    .from("tenant_records")
-    .select(
-      "entity_type, entity_id, payload, updated_at_ms, deleted_at_ms, created_by, created_by_name, updated_by, updated_by_name, server_updated_at",
-    )
-    .eq("tenant_id", tenantId)
-    .order("server_updated_at", { ascending: true });
+  const storedCursor = loadTenantSyncCursor(tenantId, storage);
+  const revisionCursor = parseRevisionCursor(storedCursor);
 
-  if (cursorIso) {
-    query = query.gt("server_updated_at", cursorIso);
+  // Paginate the whole delta instead of trusting the default PostgREST page
+  // size. Ordering follows the server-assigned monotonic `revision`, so ties
+  // inside one transaction can no longer swallow records (findings 04/09).
+  const byEntity = new Map<string, RemoteTenantRecord>();
+  let maxRevision: number | null = revisionCursor;
+  let maxServerUpdatedAt: string | null = null;
+
+  for (let page = 0; page < SYNC_MAX_PAGES; page += 1) {
+    let query = sb
+      .from("tenant_records")
+      .select(
+        "entity_type, entity_id, payload, updated_at_ms, deleted_at_ms, created_by, created_by_name, updated_by, updated_by_name, server_updated_at, revision",
+      )
+      .eq("tenant_id", tenantId)
+      .order("revision", { ascending: true })
+      .limit(SYNC_PAGE_SIZE);
+
+    if (revisionCursor !== null) {
+      query = query.gt("revision", revisionCursor);
+    } else if (storedCursor) {
+      // Legacy ISO cursor from an older client: re-read inclusively so nothing
+      // is skipped, then switch to the revision cursor below.
+      query = query.gte("server_updated_at", storedCursor);
+    }
+
+    const { data: remoteRows, error: pullErr } = await query;
+    if (pullErr) throw new Error(pullErr.message);
+
+    const batch = ((remoteRows ?? []) as RemoteTenantRecord[]).filter(Boolean);
+    for (const row of batch) {
+      byEntity.set(`${row.entity_type}:${row.entity_id}`, row);
+      const rev = Number((row as { revision?: number | string }).revision);
+      if (Number.isSafeInteger(rev) && (maxRevision === null || rev > maxRevision)) {
+        maxRevision = rev;
+      }
+      if (row.server_updated_at && (!maxServerUpdatedAt || row.server_updated_at > maxServerUpdatedAt)) {
+        maxServerUpdatedAt = row.server_updated_at;
+      }
+    }
+
+    if (batch.length < SYNC_PAGE_SIZE) break;
   }
 
-  const { data: remoteRows, error: pullErr } = await query;
-  if (pullErr) throw new Error(pullErr.message);
-
-  const rows = (remoteRows ?? []) as RemoteTenantRecord[];
+  const rows = [...byEntity.values()];
   const remainingOutbox = loadTenantOutbox(tenantId, storage);
   const mergedData = mergeRemoteRecordsIntoData(localData, rows, remainingOutbox);
 
   if (rows.length > 0) {
-    const maxServerTs = rows[rows.length - 1]?.server_updated_at;
-    if (maxServerTs) saveTenantSyncCursor(tenantId, maxServerTs, storage);
+    const nextCursor =
+      maxRevision !== null && maxRevision > (revisionCursor ?? -1)
+        ? `rev:${maxRevision}`
+        : maxServerUpdatedAt;
+    if (nextCursor) saveTenantSyncCursor(tenantId, nextCursor, storage);
   }
 
   return {
@@ -877,6 +994,7 @@ export async function adminListUsers(): Promise<AdminManagedUser[]> {
     displayName: String(u.displayName ?? ""),
     isSuperAdmin: Boolean(u.isSuperAdmin),
     banned: Boolean(u.banned),
+    emailVerified: u.emailVerified === undefined ? undefined : Boolean(u.emailVerified),
     createdAt: String(u.createdAt ?? ""),
     lastSignInAt: (u.lastSignInAt as string | null) ?? null,
     workspaces: Array.isArray(u.workspaces)

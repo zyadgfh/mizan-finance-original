@@ -7,29 +7,40 @@ on:
       - main
       - "arena/**"
 
+# Least privilege at the workflow level; the job widens only what it needs.
 permissions:
-  contents: write
-  statuses: write
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   android-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: write # release asset + blob used by the sandbox retrieval step
+      statuses: write # commit status consumed by the sandbox
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
+        with:
+          # Never leave the workflow token in .git/config for later steps.
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: npm
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.7.1
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Accept Android SDK licenses and install SDK 36
         run: |
+          set -euo pipefail
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           if [ ! -x "$SDKMANAGER" ]; then
             SDKMANAGER="$(find "$ANDROID_HOME" -name sdkmanager -type f | head -n 1)"
@@ -38,7 +49,7 @@ jobs:
           "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
 
       - name: Verify TypeScript, lint, and tests
         run: npm run typecheck && npm run lint && npm test
@@ -46,40 +57,56 @@ jobs:
       - name: Build native bundle and sync Capacitor Android
         run: npm run cap:sync
 
-      - name: Prepare Release Keystore
+      - name: Prepare signing keystore
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          KEYSTORE_FILE="/tmp/mizan-release.jks"
-          if [ -n "$KEYSTORE_B64" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > "$KEYSTORE_FILE"
-            echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
-            echo "ANDROID_KEYSTORE_PASSWORD=${KS_PASS:-mizan-release-key}" >> "$GITHUB_ENV"
-            echo "ANDROID_KEY_ALIAS=${KEY_ALIAS:-mizan}" >> "$GITHUB_ENV"
-            echo "ANDROID_KEY_PASSWORD=${KEY_PASS:-mizan-release-key}" >> "$GITHUB_ENV"
+          set -euo pipefail
+          KEYSTORE_FILE="$RUNNER_TEMP/mizan-release.jks"
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            # Fail closed: a release keystore without its credentials is unusable
+            # and must never silently fall back to a throwaway key.
+            : "${KS_PASS:?ANDROID_KEYSTORE_PASSWORD must be set alongside the keystore}"
+            : "${KEY_ALIAS:?ANDROID_KEY_ALIAS must be set alongside the keystore}"
+            : "${KEY_PASS:?ANDROID_KEY_PASSWORD must be set alongside the keystore}"
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE_FILE"
+            chmod 600 "$KEYSTORE_FILE"
+            echo "RELEASE_SIGNED=true" >> "$GITHUB_ENV"
           else
+            # CI smoke build only: an ephemeral, random key keeps the pipeline
+            # green without producing anything that could pass as an official
+            # release artifact.
+            RANDOM_PASS="$(head -c 32 /dev/urandom | base64)"
             keytool -genkeypair -v \
               -keystore "$KEYSTORE_FILE" \
               -storetype PKCS12 \
               -alias mizan \
               -keyalg RSA \
               -keysize 2048 \
-              -validity 10000 \
-              -storepass "mizan-release-key" \
-              -keypass "mizan-release-key" \
-              -dname "CN=Mizan Finance, OU=Mobile, O=Mizan, L=Hurghada, ST=Red Sea, C=EG"
-            echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
-            echo "ANDROID_KEYSTORE_PASSWORD=mizan-release-key" >> "$GITHUB_ENV"
-            echo "ANDROID_KEY_ALIAS=mizan" >> "$GITHUB_ENV"
-            echo "ANDROID_KEY_PASSWORD=mizan-release-key" >> "$GITHUB_ENV"
+              -validity 30 \
+              -storepass "$RANDOM_PASS" \
+              -keypass "$RANDOM_PASS" \
+              -dname "CN=Mizan CI Smoke, OU=Mobile, O=Mizan, C=EG"
+            KEY_ALIAS="mizan"
+            KS_PASS="$RANDOM_PASS"
+            KEY_PASS="$RANDOM_PASS"
+            echo "RELEASE_SIGNED=false" >> "$GITHUB_ENV"
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not configured — building a smoke-signed APK; release publishing is skipped."
           fi
+          {
+            echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_FILE"
+            echo "ANDROID_KEYSTORE_PASSWORD=$KS_PASS"
+            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$KEY_PASS"
+          } >> "$GITHUB_ENV"
 
       - name: Build Android Signed Release & Debug APKs
         working-directory: android
         run: |
+          set -euo pipefail
           export ANDROID_VERSION_CODE=$((100 + ${GITHUB_RUN_NUMBER:-20}))
           export ANDROID_VERSION_NAME="2.0.${GITHUB_RUN_NUMBER:-20}"
           chmod +x gradlew
@@ -87,28 +114,32 @@ jobs:
 
       - name: Stage APK artifacts
         run: |
+          set -euo pipefail
           cp android/app/build/outputs/apk/release/app-release.apk mizan-finance-release.apk
           cp android/app/build/outputs/apk/debug/app-debug.apk mizan-debug.apk
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mizan-release-apk
           path: mizan-finance-release.apk
           if-no-files-found: error
           retention-days: 60
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mizan-debug-apk
           path: mizan-debug.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish Signed Release APK to GitHub Releases on main
-        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+      - name: Publish signed release APK (main only, real keystore only)
+        if: >-
+          env.RELEASE_SIGNED == 'true' &&
+          (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="v2.0.${{ github.run_number }}"
           APK_SHA="$(sha256sum mizan-finance-release.apk | awk '{print $1}')"
           gh release create "$TAG" mizan-finance-release.apk \
@@ -121,9 +152,13 @@ jobs:
             --latest
 
       - name: Publish APK blob checksum status for sandbox retrieval
+        if: >-
+          env.RELEASE_SIGNED == 'true' &&
+          (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           APK_SHA256="$(sha256sum mizan-finance-release.apk | awk '{print $1}')"
           BLOB_SHA="$(node -e '
             const fs = require("fs");
@@ -131,10 +166,14 @@ jobs:
               content: fs.readFileSync("mizan-finance-release.apk").toString("base64"),
               encoding: "base64"
             });
-            fs.writeFileSync("/tmp/blob.json", payload);
-          ' && gh api "repos/${{ github.repository }}/git/blobs" --method POST --input /tmp/blob.json --jq '.sha')"
+            fs.writeFileSync(process.env.RUNNER_TEMP + "/blob.json", payload);
+          ' && gh api "repos/${{ github.repository }}/git/blobs" --method POST --input "$RUNNER_TEMP/blob.json" --jq '.sha')"
           gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" \
             -f state="success" \
             -f context="mizan/android-apk" \
             -f description="blob:${BLOB_SHA}:${APK_SHA256:0:16}"
-          rm -f /tmp/blob.json /tmp/mizan-release.jks
+          rm -f "$RUNNER_TEMP/blob.json"
+
+      - name: Remove keystore material
+        if: always()
+        run: rm -f "${ANDROID_KEYSTORE_PATH:-$RUNNER_TEMP/mizan-release.jks}"

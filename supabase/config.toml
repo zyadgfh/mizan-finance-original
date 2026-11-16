@@ -1,0 +1,9 @@
+# Supabase CLI project configuration.
+# The admin-users function serves two intentionally public actions
+# (setup_owner and register_subscriber), so JWT verification is disabled at the
+# gateway and enforced inside the function for every authenticated action.
+# Do not re-enable verify_jwt without moving those two actions to a separate
+# function.
+
+[functions.admin-users]
+verify_jwt = false

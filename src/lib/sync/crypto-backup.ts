@@ -14,6 +14,32 @@ export type EncryptedBackupEnvelope = {
 
 const KDF_ITERATIONS = 120_000;
 
+/**
+ * Hard bounds for untrusted envelopes. A malicious "backup" file must not be
+ * able to pin the device CPU with a billion PBKDF2 rounds or hand us gigabytes
+ * of ciphertext (audit finding 15).
+ */
+const MIN_KDF_ITERATIONS = 100_000;
+const MAX_KDF_ITERATIONS = 1_000_000;
+const SALT_BYTES = 16;
+const IV_BYTES = 12;
+const MAX_CIPHERTEXT_BYTES = 64 * 1024 * 1024;
+const MAX_PLAINTEXT_BYTES = 32 * 1024 * 1024;
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function validBase64(value: string, maxBytes: number): Uint8Array | null {
+  const trimmed = value.replace(/\s+/g, "");
+  if (!trimmed || trimmed.length > Math.ceil((maxBytes * 4) / 3) + 4) return null;
+  // Length must be a whole number of base64 quanta (ignoring padding).
+  if (!BASE64_RE.test(trimmed)) return null;
+  try {
+    const bytes = fromBase64(trimmed);
+    return bytes.length > 0 && bytes.length <= maxBytes ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
 function toBase64(bytes: Uint8Array): string {
   if (typeof Buffer !== "undefined") {
     return Buffer.from(bytes).toString("base64");
@@ -62,18 +88,33 @@ async function deriveAesKey(passphrase: string, salt: Uint8Array, iterations: nu
 }
 
 export function isEncryptedBackupEnvelope(value: unknown): value is EncryptedBackupEnvelope {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Partial<EncryptedBackupEnvelope>;
-  return (
-    v.encrypted === true &&
-    v.version === 1 &&
-    v.alg === "AES-GCM" &&
-    v.kdf === "PBKDF2-SHA256" &&
-    typeof v.iterations === "number" &&
-    typeof v.salt === "string" &&
-    typeof v.iv === "string" &&
-    typeof v.ciphertext === "string"
-  );
+  if (
+    v.encrypted !== true ||
+    v.version !== 1 ||
+    v.alg !== "AES-GCM" ||
+    v.kdf !== "PBKDF2-SHA256" ||
+    typeof v.iterations !== "number" ||
+    !Number.isInteger(v.iterations) ||
+    v.iterations < MIN_KDF_ITERATIONS ||
+    v.iterations > MAX_KDF_ITERATIONS ||
+    typeof v.salt !== "string" ||
+    typeof v.iv !== "string" ||
+    typeof v.ciphertext !== "string"
+  ) {
+    return false;
+  }
+
+  const salt = validBase64(v.salt, SALT_BYTES);
+  if (!salt || salt.length !== SALT_BYTES) return false;
+
+  const iv = validBase64(v.iv, IV_BYTES);
+  if (!iv || iv.length !== IV_BYTES) return false;
+
+  const ciphertext = validBase64(v.ciphertext, MAX_CIPHERTEXT_BYTES);
+  // AES-GCM always appends a 16-byte authentication tag.
+  return Boolean(ciphertext && ciphertext.length > 16);
 }
 
 export async function encryptBackupPayload(plainJson: string, passphrase: string): Promise<EncryptedBackupEnvelope> {
@@ -102,22 +143,36 @@ export async function decryptBackupPayload(
   passphrase: string,
 ): Promise<string> {
   if (!isEncryptedBackupEnvelope(envelope)) {
-    throw new Error("صيغة النسخة المشفّرة غير صالحة");
+    throw new Error("صيغة النسخة المشفّرة غير صالحة أو خارج الحدود المسموحة");
   }
-  const salt = fromBase64(envelope.salt);
-  const iv = fromBase64(envelope.iv);
-  const ciphertext = fromBase64(envelope.ciphertext);
-  const key = await deriveAesKey(passphrase, salt, envelope.iterations || KDF_ITERATIONS, ["decrypt"]);
+  if (!passphrase || passphrase.length > 1024) {
+    throw new Error("كلمة مرور التشفير غير صالحة");
+  }
+
+  const salt = validBase64(envelope.salt, SALT_BYTES);
+  const iv = validBase64(envelope.iv, IV_BYTES);
+  const ciphertext = validBase64(envelope.ciphertext, MAX_CIPHERTEXT_BYTES);
+  if (!salt || !iv || !ciphertext) {
+    throw new Error("بنية النسخة المشفّرة غير صالحة");
+  }
+
+  const key = await deriveAesKey(passphrase, salt, envelope.iterations, ["decrypt"]);
+  let plain: ArrayBuffer;
   try {
-    const plain = await crypto.subtle.decrypt(
+    plain = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: toArrayBuffer(iv) },
       key,
       toArrayBuffer(ciphertext),
     );
-    return new TextDecoder().decode(plain);
   } catch {
     throw new Error("كلمة مرور فك التشفير غير صحيحة أو البيانات تالفة");
   }
+
+  if (plain.byteLength > MAX_PLAINTEXT_BYTES) {
+    throw new Error("حجم البيانات بعد فك التشفير يتجاوز الحد المسموح");
+  }
+
+  return new TextDecoder().decode(plain);
 }
 
 export type BackupValidationResult =
@@ -148,6 +203,16 @@ export function validateBackupJsonObject(raw: unknown): BackupValidationResult {
   if (d.openingBalance !== undefined && (typeof d.openingBalance !== "number" || !Number.isFinite(d.openingBalance) || d.openingBalance < 0)) {
     return { ok: false, error: "الرصيد الافتتاحي غير صالح" };
   }
+  const MAX_ROWS = 200_000;
+  for (const list of [d.txns, d.people, d.debts, d.payments, d.categories]) {
+    if (list.length > MAX_ROWS) {
+      return { ok: false, error: "حجم النسخة الاحتياطية يتجاوز الحد المسموح" };
+    }
+  }
+  if (Array.isArray(d.goals) && d.goals.length > MAX_ROWS) {
+    return { ok: false, error: "حجم النسخة الاحتياطية يتجاوز الحد المسموح" };
+  }
+
   for (const t of d.txns) {
     if (
       !t ||

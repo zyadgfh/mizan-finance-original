@@ -1,0 +1,68 @@
+name: Apply Supabase migrations
+
+# The audit found no reliable, reviewable path that actually applies
+# supabase/migrations/*.sql to the hosted database. This workflow is that path:
+# it runs only from main, only when migrations change, records every applied
+# file, and refuses to guess a target database.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "supabase/migrations/**"
+      - ".github/workflows/supabase-migrations.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-migrations
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
+        with:
+          persist-credentials: false
+
+      - name: Apply pending migrations
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SUPABASE_DB_URL:-}" ]; then
+            echo "::error::SUPABASE_DB_URL is not configured. Add the hosted Postgres connection string as a repository secret."
+            exit 1
+          fi
+
+          psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          create table if not exists public._mizan_schema_migrations (
+            name text primary key,
+            checksum text not null,
+            applied_at timestamptz not null default now()
+          );
+          SQL
+
+          shopt -s nullglob
+          for file in $(ls supabase/migrations/*.sql | sort); do
+            name="$(basename "$file")"
+            applied="$(psql "$SUPABASE_DB_URL" -tA -c "select 1 from public._mizan_schema_migrations where name = '${name}'")"
+            if [ "${applied}" = "1" ]; then
+              echo "skip  ${name} (already applied)"
+              continue
+            fi
+
+            checksum="$(sha256sum "$file" | awk '{print $1}')"
+            echo "apply ${name}"
+            # One transaction per file: the migration and its bookkeeping row
+            # either both land or neither does.
+            psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 --single-transaction \
+              -f "$file" \
+              -c "insert into public._mizan_schema_migrations (name, checksum) values ('${name}', '${checksum}')"
+          done

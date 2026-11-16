@@ -179,12 +179,13 @@ export function loadTenantSyncCursor(
 
 export function saveTenantSyncCursor(
   tenantId: string,
-  cursorIso: string | null,
+  /** `rev:<n>` for the revision cursor, or a legacy ISO timestamp. */
+  cursor: string | null,
   storage: Storage | undefined = typeof localStorage !== "undefined" ? localStorage : undefined,
 ): void {
   if (!storage || !tenantId) return;
-  if (!cursorIso) storage.removeItem(tenantCursorKey(tenantId));
-  else storage.setItem(tenantCursorKey(tenantId), cursorIso);
+  if (!cursor) storage.removeItem(tenantCursorKey(tenantId));
+  else storage.setItem(tenantCursorKey(tenantId), cursor);
 }
 
 export function loadLegacyMizanV1Raw(
@@ -320,6 +321,8 @@ export type RemoteTenantRecord = {
   updated_by?: string | null;
   updated_by_name?: string | null;
   server_updated_at: string;
+  /** Monotonic, server-assigned sync revision (new schema). */
+  revision?: number | string;
 };
 
 /** Entity-level Last-Write-Wins (LWW) + tombstone merge protecting newer pending outbox edits. */

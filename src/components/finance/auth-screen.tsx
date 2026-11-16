@@ -30,9 +30,11 @@ import { APPLE_THEMES, updateUiPrefs, useUiPrefs } from "@/lib/finance/prefs";
 import { copyTextSafe, isNativeMobileApp } from "@/lib/mobile-safe";
 import {
   checkHasPlatformOwner,
+  EmailNotVerifiedError,
   fetchPublicSignupConfig,
   registerNewSubscriberWithPayment,
   requestPasswordResetEmail,
+  resendSignupVerification,
   setupInitialPlatformOwner,
   signInWithEmailPassword,
 } from "@/lib/tenant/api";
@@ -73,6 +75,9 @@ export function AuthScreen({
   const [signupName, setSignupName] = useState("");
   const [signupIdentifier, setSignupIdentifier] = useState("");
   const [signupPassword, setSignupPassword] = useState("");
+  const [signupEmail, setSignupEmail] = useState("");
+  const [bootstrapSecret, setBootstrapSecret] = useState("");
+  const [needsVerification, setNeedsVerification] = useState(false);
   const [showSignupPass, setShowSignupPass] = useState(false);
   const [selectedPlan, setSelectedPlan] = useState<PlanCode>("monthly");
   const [payMethod, setPayMethod] = useState<"instapay" | "vodafone_cash">("instapay");
@@ -164,11 +169,15 @@ export function AuthScreen({
       sessionStorage.setItem(PENDING_INVITE_KEY, inviteCode.trim().toUpperCase());
     }
     setBusy(true);
+    setNeedsVerification(false);
     try {
       await signInWithEmailPassword(identifier, password);
       toast.success(isAr ? "تم تسجيل الدخول بنجاح" : "Signed in successfully");
       onSignedIn?.();
     } catch (err) {
+      if (err instanceof EmailNotVerifiedError) {
+        setNeedsVerification(true);
+      }
       toast.error(
         err instanceof Error
           ? err.message
@@ -176,6 +185,21 @@ export function AuthScreen({
             ? "بيانات الدخول غير صحيحة"
             : "Invalid credentials",
       );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resendVerification = async () => {
+    setBusy(true);
+    try {
+      await resendSignupVerification(identifier);
+      toast.success(
+        isAr ? "تم إرسال رابط التأكيد، تحقق من بريدك الإلكتروني" : "Verification link sent — check your inbox",
+      );
+      setNeedsVerification(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isAr ? "تعذّر إرسال رابط التأكيد" : "Failed to resend");
     } finally {
       setBusy(false);
     }
@@ -192,11 +216,19 @@ export function AuthScreen({
       );
       return;
     }
-    if (signupPassword.length < 6) {
+    if (signupPassword.length < 8) {
       toast.error(
         isAr
-          ? "كلمة المرور يجب أن تتكون من 6 أحرف أو أرقام على الأقل"
-          : "Password must be at least 6 characters",
+          ? "كلمة المرور يجب أن تتكون من 8 أحرف أو أرقام على الأقل"
+          : "Password must be at least 8 characters",
+      );
+      return;
+    }
+    if (normalized.kind === "phone" && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(signupEmail.trim())) {
+      toast.error(
+        isAr
+          ? "أدخل بريداً إلكترونياً صحيحاً لتأكيد الحساب (رقم الهاتف وحده لا يكفي)"
+          : "Enter a valid email address to verify the account",
       );
       return;
     }
@@ -243,7 +275,8 @@ export function AuthScreen({
 
     setBusy(true);
     try {
-      await registerNewSubscriberWithPayment({
+      const normalizedSignup = normalizeSubscriberIdentity(signupIdentifier);
+      const verification = await registerNewSubscriberWithPayment({
         identifier: signupIdentifier,
         password: signupPassword,
         displayName: signupName,
@@ -251,13 +284,21 @@ export function AuthScreen({
         paymentMethod: payMethod,
         senderHandle,
         proofDataUrl,
+        email: normalizedSignup?.kind === "phone" ? signupEmail.trim() : undefined,
       });
       toast.success(
-        isAr
-          ? "تم إرسال طلب الاشتراك وصورة التحويل بنجاح! سيقوم المالك بمراجعته وتفعيل حسابك."
-          : "Registration & payment proof submitted! Awaiting owner activation.",
+        verification.verificationEmailSent
+          ? isAr
+            ? "تم إرسال طلب الاشتراك! أرسلنا رابط تأكيد إلى بريدك — أكّده ثم سجّل الدخول."
+            : "Registration submitted! Confirm the email we sent, then sign in."
+          : isAr
+            ? "تم إرسال طلب الاشتراك! أكّد بريدك الإلكتروني ثم سجّل الدخول."
+            : "Registration submitted! Verify your email, then sign in.",
       );
-      onSignedIn?.();
+      setIdentifier(signupIdentifier);
+      setView("signin");
+      setSignupStep("account");
+      setNeedsVerification(true);
     } catch (err) {
       toast.error(
         err instanceof Error
@@ -301,9 +342,17 @@ export function AuthScreen({
 
   const submitOwnerSetup = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (password.length < 6) {
+    if (password.length < 8) {
       toast.error(
-        isAr ? "كلمة المرور يجب أن تكون 6 أحرف على الأقل" : "Password must be at least 6 characters",
+        isAr ? "كلمة المرور يجب أن تكون 8 أحرف على الأقل" : "Password must be at least 8 characters",
+      );
+      return;
+    }
+    if (bootstrapSecret.trim().length < 32) {
+      toast.error(
+        isAr
+          ? "أدخل رمز تهيئة المنصة (MIZAN_BOOTSTRAP_SECRET) المكوّن من 32 حرفاً على الأقل"
+          : "Enter the platform bootstrap secret (32+ characters)",
       );
       return;
     }
@@ -313,14 +362,18 @@ export function AuthScreen({
         email: DEFAULT_OWNER_EMAIL,
         password,
         displayName: ownerName,
+        bootstrapSecret: bootstrapSecret.trim(),
       });
       setNeedsOwnerBootstrap(false);
+      setBootstrapSecret("");
+      setIdentifier(DEFAULT_OWNER_EMAIL);
+      setView("signin");
+      setNeedsVerification(true);
       toast.success(
         isAr
-          ? "تم تفعيل حساب مالك المنصة وتسجيل الدخول بنجاح"
-          : "Platform owner account initialized",
+          ? "تم إنشاء حساب المالك. أكّد بريدك الإلكتروني ثم سجّل الدخول."
+          : "Owner account created. Verify your email, then sign in.",
       );
-      onSignedIn?.();
     } catch (err) {
       toast.error(
         err instanceof Error
@@ -504,6 +557,24 @@ export function AuthScreen({
               </div>
             </div>
 
+            {needsVerification && (
+              <div className="p-3 rounded-2xl bg-[var(--tint-soft)] border border-[var(--tint)] space-y-2">
+                <p className="text-[11px] font-semibold text-[var(--tint)] leading-relaxed">
+                  {isAr
+                    ? "حسابك لم يُفعّل بعد: يجب تأكيد بريدك الإلكتروني أولاً."
+                    : "Your account is not active yet — confirm your email first."}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void resendVerification()}
+                  disabled={busy}
+                  className="h-9 px-3.5 rounded-xl bg-[var(--tint)] text-white text-[12px] font-semibold disabled:opacity-60"
+                >
+                  {isAr ? "إعادة إرسال رابط التأكيد" : "Resend verification email"}
+                </button>
+              </div>
+            )}
+
             {/* Optional Invite Code */}
             <div>
               {!showInviteField ? (
@@ -619,9 +690,32 @@ export function AuthScreen({
                   </div>
                 </div>
 
+                {normalizeSubscriberIdentity(signupIdentifier)?.kind === "phone" && (
+                  <div className="space-y-1">
+                    <label className="text-[12px] font-semibold text-[var(--label-2)] block">
+                      {isAr ? "البريد الإلكتروني لتأكيد الحساب *" : "Email for account verification *"}
+                    </label>
+                    <input
+                      type="email"
+                      dir="ltr"
+                      autoComplete="email"
+                      value={signupEmail}
+                      onChange={(e) => setSignupEmail(e.target.value)}
+                      placeholder="name@mail.com"
+                      className="w-full h-11 px-3.5 rounded-xl bg-[var(--fill)] text-[14px] outline-none focus:ring-2 ring-[var(--tint)]"
+                      required
+                    />
+                    <p className="text-[10px] text-[var(--label-3)]">
+                      {isAr
+                        ? "رقم الهاتف لا يكفي وحده: نرسل رابط تأكيد إلى هذا البريد قبل تفعيل الدخول."
+                        : "A phone number alone cannot be verified — we email a confirmation link."}
+                    </p>
+                  </div>
+                )}
+
                 <div className="space-y-1">
                   <label className="text-[12px] font-semibold text-[var(--label-2)] block">
-                    {isAr ? "كلمة المرور (6 أحرف أو أرقام على الأقل) *" : "Password (6+ characters) *"}
+                    {isAr ? "كلمة المرور (8 أحرف أو أرقام على الأقل) *" : "Password (8+ characters) *"}
                   </label>
                   <div className="relative">
                     <Lock className="w-4 h-4 text-[var(--label-3)] absolute top-1/2 -translate-y-1/2 start-3.5" />
@@ -629,7 +723,7 @@ export function AuthScreen({
                       type={showSignupPass ? "text" : "password"}
                       dir="ltr"
                       autoComplete="new-password"
-                      minLength={6}
+                      minLength={8}
                       value={signupPassword}
                       onChange={(e) => setSignupPassword(e.target.value)}
                       placeholder="••••••••"
@@ -1051,13 +1145,38 @@ export function AuthScreen({
             <input
               type="password"
               dir="ltr"
-              minLength={6}
+              autoComplete="new-password"
+              minLength={8}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder={isAr ? "اختر كلمة مرور قوية (6+ أحرف)" : "Choose strong password (6+ chars)"}
+              placeholder={isAr ? "اختر كلمة مرور قوية (8+ أحرف)" : "Choose strong password (8+ chars)"}
               className="w-full h-10 px-3.5 rounded-xl bg-[var(--fill)] text-[14px]"
               required
             />
+            <div className="space-y-1">
+              <input
+                type="password"
+                dir="ltr"
+                autoComplete="off"
+                value={bootstrapSecret}
+                onChange={(e) => setBootstrapSecret(e.target.value)}
+                placeholder={
+                  isAr ? "رمز تهيئة المنصة (MIZAN_BOOTSTRAP_SECRET)" : "Platform bootstrap secret"
+                }
+                className="w-full h-10 px-3.5 rounded-xl bg-[var(--fill)] text-[13px]"
+                required
+              />
+              <p className="text-[10px] text-[var(--label-3)] leading-relaxed">
+                {isAr
+                  ? "رمز سري أحادي الاستخدام محفوظ في أسرار المشروع، مطلوب لمنع أي طرف آخر من حجز حساب المالك."
+                  : "A single-use secret stored in the project secrets; it prevents anyone else from claiming the owner account."}
+              </p>
+            </div>
+            <p className="text-[10px] text-[var(--label-3)] leading-relaxed">
+              {isAr
+                ? "سيتم إرسال رابط تأكيد إلى البريد أعلاه، ويجب تأكيده قبل تسجيل الدخول."
+                : "A confirmation link is emailed to the address above and must be confirmed before signing in."}
+            </p>
             <PillButton type="submit" disabled={busy} className="w-full h-11 text-[14px] justify-center">
               {busy
                 ? isAr

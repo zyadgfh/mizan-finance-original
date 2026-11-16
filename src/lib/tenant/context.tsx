@@ -27,7 +27,6 @@ import { getSupabaseClient } from "../supabase/client.ts";
 import {
   activateTenantPlan,
   createCloudWorkspace,
-  enforceExpiredSubscriptionsNow,
   fetchMyWorkspaceBundle,
   queueOutboxOperations,
   redeemTenantInvite,
@@ -237,18 +236,10 @@ export function TenantProvider({
     [activeTenant, isSuperAdmin, nowTick],
   );
 
-  // Immediately persist automatic expiration server-side when period ends while app is open
-  useEffect(() => {
-    if (
-      authStatus === "authenticated" &&
-      !initialSession &&
-      isOnline &&
-      subscriptionBlockReason === "expired" &&
-      activeTenant?.subscriptionStatus !== "expired"
-    ) {
-      void enforceExpiredSubscriptionsNow().catch(() => undefined);
-    }
-  }, [authStatus, initialSession, isOnline, subscriptionBlockReason, activeTenant?.subscriptionStatus]);
+  // Expiration is swept server-side (pg_cron / the platform owner's admin
+  // action). Clients no longer call the sweep RPC: it is not executable by
+  // subscriber sessions, and write access is already blocked locally as soon
+  // as the local period ends.
 
   const syncSpecificTenant = useCallback(
     async (tenant: TenantSummary | null) => {

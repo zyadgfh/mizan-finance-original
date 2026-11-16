@@ -33,7 +33,7 @@ import {
   shortDate,
   walletBalance,
 } from "@/lib/finance/logic";
-import { hashPin } from "@/lib/finance/pin";
+import { pinLockoutRemainingMs, recordPinFailure, verifyPin, writePinHash } from "@/lib/finance/pin";
 import {
   exportMonthlyReportCsv,
   exportMonthlyReportJson,
@@ -647,6 +647,7 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
   const security = useSecuritySettings();
   const [digits, setDigits] = useState("");
   const [error, setError] = useState(false);
+  const [lockMessage, setLockMessage] = useState<string | null>(null);
   const [bioBusy, setBioBusy] = useState(false);
   const { ref: dotsRef, triggerShake } = usePinShake();
   const canBio = Boolean(security.biometricEnabled && security.biometricCredentialId);
@@ -677,19 +678,35 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
     setDigits(next);
     setError(false);
     if (next.length < 4 || !pinHash) return;
-    const hashed = await hashPin(next);
-    if (hashed === pinHash) onUnlock();
-    else {
+
+    const remainingMs = pinLockoutRemainingMs();
+    if (remainingMs > 0) {
       setError(true);
       setDigits("");
       triggerShake();
+      setLockMessage(`محاولات كثيرة — انتظر ${Math.ceil(remainingMs / 1000)} ثانية`);
+      return;
+    }
+
+    const result = await verifyPin(next, pinHash);
+    if (result.ok) {
+      // Transparently upgrade legacy SHA-256 records to the salted KDF.
+      if (result.upgraded) writePinHash(result.upgraded);
+      setLockMessage(null);
+      onUnlock();
+    } else {
+      const delayMs = recordPinFailure();
+      setError(true);
+      setDigits("");
+      triggerShake();
+      setLockMessage(delayMs > 0 ? `محاولات كثيرة — انتظر ${Math.ceil(delayMs / 1000)} ثانية` : null);
     }
   }
 
   return (
     <div className="flex h-full flex-col items-center justify-center px-6 pb-10">
       <h1 className="text-title2 font-semibold">أدخل الرمز</h1>
-      <p className={cn("mt-2 text-sub", error ? "text-expense" : "text-label-2")}>{error ? "رمز غير صحيح" : "ميزان مقفل على هذا الجهاز"}</p>
+      <p className={cn("mt-2 text-sub", error ? "text-expense" : "text-label-2")}>{lockMessage ?? (error ? "رمز غير صحيح" : "ميزان مقفل على هذا الجهاز")}</p>
       <div ref={dotsRef} className="mt-6 flex gap-3.5" dir="ltr">
         {[0, 1, 2, 3].map((i) => (
           <span
