@@ -148,6 +148,22 @@ Authentication → Emails → SMTP Settings
 `smtp_host` يصبح `live.smtp.mailtrap.io` و`smtp_port` = `587` → الإثبات أن الضبط
 وصل فعلًا، وليس مجرد «حفظت».
 
+### ٤.٤.١ خطأ شائع — «المُرسِل» ليس رابطًا
+
+قيمة مثل `noreply@https://mizan-finance-rho.vercel.app/` **ليست بريدًا** ولن تُرسل رسالة واحدة.
+حقل `Sender email` يقبل عنوانًا من الشكل `local@domain` فقط، ويجب أن يكون **نطاقه موثّقًا
+لدى المزوّد** (SPF + DKIM).
+
+| قيمة | صحيحة؟ | السبب |
+|---|---|---|
+| `noreply@https://mizan-finance-rho.vercel.app/` | ❌ | رابط لا بريد |
+| `noreply@mizan-finance-rho.vercel.app` | ❌ | `vercel.app` مملوك لـ Vercel — لا يمكنك إضافة سجلات DNS له، فلن يُوثَّق أبدًا |
+| `noreply@mizan.app` | ✅ | نطاق تملكه + سجلات SPF/DKIM |
+| `hello@demomailtrap.co` | ⚠️ للاختبار فقط | نطاق عرضي من Mailtrap — لا يصلح إنتاجًا |
+
+**قاعدة عملية:** إن لم تكن تستطيع تعديل سجلات DNS للنطاق، فلا يمكن أن يكون نطاق إرسال.
+هذا يستثني `*.vercel.app` و`*.e2b.app` وكل نطاق مجاني لا تملك منطقه.
+
 ### ٤.٥ النشر يستبدل الدالة الحيّة — ولا توجد نسخة رجوع في git
 
 | الحقيقة | الأثر |
