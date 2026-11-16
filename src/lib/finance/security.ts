@@ -149,7 +149,111 @@ function fromBase64Url(str: string): Uint8Array {
   return bytes;
 }
 
+/**
+ * Native app-lock bridge (Android APK).
+ *
+ * The Capacitor WebView does not implement WebAuthn: `navigator.credentials` is
+ * absent or `PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()`
+ * reports false, which made the fingerprint switch look "unsupported" inside the
+ * APK while working in Chrome. MainActivity now exposes the platform
+ * BiometricPrompt through the same JS bridge as sharing and FLAG_SECURE, behind
+ * the identical trusted-origin check.
+ */
+type NativeBiometricBridge = {
+  biometricAvailable?: () => boolean;
+  authenticateBiometric?: (requestId: string) => boolean;
+};
+
+/**
+ * Stored in place of a WebAuthn credential id when the OS owns the biometric.
+ * The secret never leaves the secure hardware, so there is nothing for us to
+ * persist beyond the fact that the user turned the feature on.
+ */
+export const NATIVE_BIOMETRIC_CREDENTIAL_ID = "native:biometric";
+
+/** A pending OS prompt is abandoned after this long so the UI never freezes. */
+const BIOMETRIC_TIMEOUT_MS = 90_000;
+
+type BiometricWindow = Window & {
+  MizanNative?: NativeBiometricBridge;
+  __mizanBiometric?: (requestId: string, ok: boolean, code?: string) => void;
+};
+
+function nativeBiometricBridge(): NativeBiometricBridge | null {
+  if (typeof window === "undefined") return null;
+  const bridge = (window as BiometricWindow).MizanNative;
+  if (!bridge || typeof bridge !== "object") return null;
+  if (typeof bridge.biometricAvailable !== "function" && typeof bridge.authenticateBiometric !== "function") {
+    return null;
+  }
+  return bridge;
+}
+
+const pendingNativePrompts = new Map<string, (ok: boolean) => void>();
+
+function installNativeResultHandler(): void {
+  if (typeof window === "undefined") return;
+  const w = window as BiometricWindow;
+  if (typeof w.__mizanBiometric === "function") return;
+  w.__mizanBiometric = (requestId: string, ok: boolean) => {
+    const settle = pendingNativePrompts.get(requestId);
+    if (!settle) return;
+    pendingNativePrompts.delete(requestId);
+    // Only the explicit success branch unlocks; cancellations, lockouts and
+    // sensor errors all arrive here as ok === false.
+    settle(ok === true);
+  };
+}
+
+/**
+ * Runs one OS biometric prompt and resolves to whether it succeeded.
+ *
+ * Fails closed: no bridge, a refused request (prompt already open), an
+ * untrusted origin or a timeout all resolve to false.
+ */
+export async function requestNativeBiometricUnlock(): Promise<boolean> {
+  const bridge = nativeBiometricBridge();
+  if (!bridge || typeof bridge.authenticateBiometric !== "function") return false;
+  installNativeResultHandler();
+
+  const requestId = `bio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const timeoutRef: { id?: ReturnType<typeof setTimeout> } = {};
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      pendingNativePrompts.delete(requestId);
+      if (timeoutRef.id !== undefined) clearTimeout(timeoutRef.id);
+      resolve(ok);
+    };
+
+    pendingNativePrompts.set(requestId, settle);
+    timeoutRef.id = setTimeout(() => settle(false), BIOMETRIC_TIMEOUT_MS);
+
+    let started = false;
+    try {
+      started = Boolean(bridge.authenticateBiometric?.(requestId));
+    } catch {
+      started = false;
+    }
+    if (!started) settle(false);
+  });
+}
+
 export async function isBiometricSupported(): Promise<boolean> {
+  const bridge = nativeBiometricBridge();
+  if (bridge) {
+    // A bridge without the availability probe still means a native prompt
+    // exists; let the prompt itself be the authority.
+    if (typeof bridge.biometricAvailable !== "function") return true;
+    try {
+      return Boolean(bridge.biometricAvailable());
+    } catch {
+      return false;
+    }
+  }
+
   if (typeof window === "undefined" || !("PublicKeyCredential" in window) || !navigator.credentials) {
     return false;
   }
@@ -164,6 +268,15 @@ export async function isBiometricSupported(): Promise<boolean> {
 }
 
 export async function registerBiometricCredential(): Promise<string> {
+  const bridge = nativeBiometricBridge();
+  if (bridge && typeof bridge.authenticateBiometric === "function") {
+    // Prove the sensor actually answers before the user relies on it, so they
+    // cannot end up locked out with a switch that is on but does nothing.
+    const ok = await requestNativeBiometricUnlock();
+    if (!ok) throw new Error("لم يكتمل التحقق من البصمة — أعد المحاولة");
+    return NATIVE_BIOMETRIC_CREDENTIAL_ID;
+  }
+
   if (!(await isBiometricSupported())) {
     throw new Error("المصادقة الحيوية غير متاحة على هذا الجهاز");
   }
@@ -191,7 +304,15 @@ export async function registerBiometricCredential(): Promise<string> {
 }
 
 export async function verifyBiometricCredential(credentialId: string): Promise<boolean> {
-  if (!credentialId || !(await isBiometricSupported())) return false;
+  if (!credentialId) return false;
+
+  if (credentialId === NATIVE_BIOMETRIC_CREDENTIAL_ID) {
+    // Never fall through to WebAuthn for the sentinel: a device that recorded a
+    // native credential must unlock through the OS prompt only.
+    return requestNativeBiometricUnlock();
+  }
+
+  if (!(await isBiometricSupported())) return false;
   try {
     const challenge = crypto.getRandomValues(new Uint8Array(32));
     const idBytes = fromBase64Url(credentialId);

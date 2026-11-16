@@ -4,4 +4,7 @@
     <string name="title_activity_main">ميزان</string>
     <string name="package_name">com.mizan.finance</string>
     <string name="custom_url_scheme">com.mizan.finance</string>
+    <string name="biometric_title">فتح ميزان</string>
+    <string name="biometric_subtitle">استخدم البصمة أو الوجه لفتح التطبيق</string>
+    <string name="biometric_cancel">استخدام الرمز</string>
 </resources>
