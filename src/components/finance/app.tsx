@@ -921,8 +921,8 @@ function App({ initialRoute }: { initialRoute?: Route }) {
                         <AlertTriangle size={14} className="shrink-0" />
                         <span>
                           {lang === "en"
-                            ? `${rejectedSyncItems.length} offline edits rejected by server permissions`
-                            : `تم رفض ${rejectedSyncItems.length} تعديلات أوفلاين من الخادم`}
+                            ? `${rejectedSyncItems.length} offline edits rejected during sync`
+                            : `تم رفض ${rejectedSyncItems.length} تعديلات أوفلاين أثناء المزامنة`}
                         </span>
                       </button>
                       <button type="button" onClick={dismissRejectedSync} className="underline shrink-0">

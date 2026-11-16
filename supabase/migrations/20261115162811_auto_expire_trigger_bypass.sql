@@ -1,4 +1,11 @@
 -- =============================================================================
+-- NOTE (history): on the live project this file's content was applied in two
+-- steps — `20261115162811 auto_expire_trigger_bypass`, then a follow-up that
+-- aligned the `tenant_audit_logs` columns used by `enforce_expired_subscriptions`
+-- (tracked remotely as `20261115172425 fix_enforce_expired_audit_columns`). The
+-- final, corrected statements live here, so replaying this file from scratch
+-- reaches the same end state; there is no separate fix file.
+-- =============================================================================
 -- Mizan Finance — Allow internal security-definer billing RPCs (such as
 -- enforce_expired_subscriptions) to update subscription_status -> 'expired'
 -- even when invoked during a regular subscriber's session, while blocking all
