@@ -136,6 +136,8 @@ export type AdminManagedUser = {
   displayName: string;
   isSuperAdmin: boolean;
   banned: boolean;
+  /** Whether the account proved ownership of its email address. */
+  emailVerified?: boolean;
   createdAt: string;
   lastSignInAt: string | null;
   workspaces: Array<{

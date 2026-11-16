@@ -720,9 +720,16 @@ test("AuthScreen supports Email-or-Phone login, 2-step New Account Registration 
     assert.ok(screen.getAllByText(/سنة كاملة/).length >= 1);
   });
 
-  // Fill phone + password and advance to Step 2 ("الدفع")
+  // Fill phone + verification email + password and advance to Step 2 ("الدفع").
+  // Phone identities must supply a real mailbox so the account can be verified.
   fireEvent.change(screen.getByPlaceholderText("010xxxxxxxx أو name@mail.com"), {
     target: { value: "01012345678" },
+  });
+  await waitFor(() => {
+    assert.ok(screen.getByText(/البريد الإلكتروني لتأكيد الحساب/));
+  });
+  fireEvent.change(screen.getByPlaceholderText("name@mail.com"), {
+    target: { value: "subscriber@example.com" },
   });
   fireEvent.change(screen.getByPlaceholderText("••••••••"), {
     target: { value: "secret123" },
