@@ -1310,3 +1310,20 @@ grant execute on function public.tenant_role(uuid) to anon;
 grant execute on function public.is_tenant_member(uuid) to anon;
 grant execute on function public.can_write_tenant(uuid) to anon;
 grant execute on function public.is_tenant_admin(uuid) to anon;
+
+-- -----------------------------------------------------------------------------
+-- 12. TRUNCATE / sequence lockdown — applied 2026-11-16 as p0_10
+--     TRUNCATE is not subject to row-level security and is unreachable through
+--     PostgREST; MAINTAIN/REFERENCES/TRIGGER are equally meaningless for a REST
+--     client. 'update' on a sequence is setval(): any client role could rewind or
+--     jump the revision counter. Clients only need USAGE, for the nextval()
+--     default on tenant_records.revision (the timestamp trigger is SECURITY
+--     DEFINER and runs as the owner).
+-- -----------------------------------------------------------------------------
+revoke truncate, references, trigger, maintain on all tables in schema public
+  from anon, authenticated;
+
+revoke all on all sequences in schema public from anon, authenticated;
+grant usage on sequence public.tenant_records_revision_seq to authenticated;
+
+notify pgrst, 'reload schema';

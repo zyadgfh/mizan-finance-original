@@ -9,8 +9,8 @@
 
 ## ١. ملخص تنفيذي
 
-طُبِّقت ثمانية من بنود الإصلاح الأمني (النتائج 01–13 من التدقيق) على قاعدة البيانات
-الحقيقية عبر **تسع هجرات مسجّلة**. قبل أي تغيير أُخذت **نسخة استرجاع كاملة داخل
+طُبِّقت بنود الإصلاح الأمني (النتائج 01–13 من التدقيق) على قاعدة البيانات
+الحقيقية عبر **إحدى عشرة هجرة مسجّلة**. قبل أي تغيير أُخذت **نسخة استرجاع كاملة داخل
 القاعدة** تشمل البيانات وتعريفات جميع الدوال والسياسات والصلاحيات.
 
 النتيجة: كل الثغرات القابلة للإصلاح على مستوى القاعدة **مُغلقة ومُثبتة بالاختبار**،
@@ -49,8 +49,9 @@
 | 8 | `20261116172515` | `p0_07_payment_request_integrity` | 07 — المبالغ والمدة من الباقة، حقول المراجعة غير قابلة للكتابة |
 | 9 | `20261116172525` | `p0_08_sweep_and_owner_promotion` | 08/01 — التنظيف ليس نقطة نهاية عامة + لا ترقية مالك ضمنية |
 | 10 | `20261116172544` | `p0_09_owner_claim_fk_and_grants` | 13 + الصلاحيات الصريحة + `claim_platform_owner` |
+| 11 | `20261116174754` | `p0_10_revoke_truncate_and_sequence_lockdown` | سحب `TRUNCATE/REFERENCES/TRIGGER/MAINTAIN` + منع `setval` على التسلسلات |
 
-> الرقم 9 يظهر عمليًا ١٠ صفوف لأن `p0_03` دُمج مع `p0_02` (نفس ملف الدالة).
+> عدد الهجرات ١١ لأن `p0_03` دُمج مع `p0_02` (نفس ملف الدالة).
 
 ---
 
@@ -104,6 +105,22 @@ select count(*) from pg_proc where prosrc ilike '%zyadgamal796%'  →  0
 
 مطابق تمامًا للسلوك قبل التغيير (بدون خطأ 42501).
 
+### ٤.٦ قفل `TRUNCATE` والتسلسلات (`p0_10`)
+
+| الاستعلام | النتيجة | الحكم |
+|---|---|---|
+| `has_table_privilege('authenticated','public.tenants','TRUNCATE')` | `false` | ✅ |
+| `has_table_privilege('anon','public.tenants','TRUNCATE')` | `false` | ✅ |
+| `has_table_privilege('authenticated','public.tenant_members','TRUNCATE')` | `false` | ✅ |
+| `has_table_privilege('authenticated','public.tenants','TRIGGER')` | `false` | ✅ |
+| `has_sequence_privilege('authenticated', '…revision_seq','UPDATE')` (أي `setval`) | `false` | ✅ |
+| `has_sequence_privilege('anon','…security_log_id_seq','USAGE')` | `false` | ✅ |
+| `has_sequence_privilege('authenticated','…revision_seq','USAGE')` | `true` | ✅ (لازم لـ `nextval` في الإدراج) |
+| دورة push حقيقية بعد القفل | نجحت، `revision = 45` | ✅ لم يُكسَر شيء |
+
+`TRUNCATE` لا يخضع لـ RLS، لكنه غير قابل للوصول عبر PostgREST — إذًا كان خطرًا
+نظريًا لا ثغرة مستغَلّة، وأُغلق مع ذلك.
+
 ---
 
 ## ٥. تغييرات سلوكية مقصودة (يجب أن يعرفها صاحب المنتج)
@@ -153,27 +170,39 @@ select * from _mizan_backup.policies;
 | البند | السبب |
 |---|---|
 | تغيير `mailer_autoconfirm` أو أي إعداد Auth | تغيير سلوك تسجيل الدخول يحتاج قرارك؛ لم يُطلب صراحة |
-| تغيير `verify_jwt` لدالة `admin-users` | يحتاج اختبار الواجهة أولًا (انظر §٨) |
+| تفعيل `verify_jwt` لدالة `admin-users` | **قرار موثَّق بالرفض** — يكسر مسار التسجيل المرجَّح بصفر مكسب (انظر §٨.١) |
+| نشر نسخة الـ repo من `admin-users` (بوابة `MIZAN_BOOTSTRAP_SECRET`) | كود حافة غير مُختبَر على بيئة تجريبية؛ كسره يعطّل التسجيل والدفع |
 | تحديث `vercel.json` / CSP / نشر الواجهة | تغيير في Vercel لم يُطلب؛ الطبقة الخلفية فقط |
 | حذف الملفات أو حزم التطوير من الـ repo | تغيير في المستودع خارج نطاق P0 الخلفي |
 | نسخ احتياطي خارجي (`pg_dump`) | لا يوجد اتصال JS مباشر؛ النسخة داخل القاعدة + git للمخطط |
 | ترحيل فرع `mizan-staging-p0` | أُنشئ لكن `with_data:false` وغير قابل للاستعلام — **لم يُستخدم كـ staging**، ولم يُحذف لأنه `is_default` |
+| حذف مخطط `_mizan_backup` | هو طريق الاسترجاع الوحيد ما دامت النسخة الجديدة غير مؤكدة |
 
 ---
 
 ## ٨. اكتشافات جديدة أثناء التنفيذ (تحتاج قرارًا)
 
-1. **`admin-users` بـ `verify_jwt: false`** — القابلية للاستدعاء بلا مصادقة
-   منصة. الكود يتحقق داخليًا (`Authorization` → `getUser` → 401، ثم
-   `platform_admins` → 403)، لذا **ليس ثغرة مؤكدة**، لكنه سطح هجوم واسع:
-   كل طلب يصل إلى كود يملك مفتاح `service_role`.
+1. **`admin-users` بـ `verify_jwt: false`** — **قرار: لم يُفعَّل، لسبب موثَّق.**
+   العميل يستدعي الدالة عبر `fetch` مباشر (`src/lib/tenant/api.ts:201`)، وفي
+   مسارات التسجيل والدفع يُستدعى بـ `requireAuth = false` فيُرسل ترويسة
+   `apikey` فقط **بلا `Authorization`** (السطور 187–197). بوابة Supabase عند
+   `verify_jwt: true` تتحقق من ترويسة `Authorization`، لذا التفعيل مرشَّح لكسر
+   مسار التسجيل — وهو مسار الإيراد. ولا يمكن التحقق من سلوك البوابة من هذه
+   البيئة (لا وصول خارجي إلى `*.supabase.co`). المكسب الأمني شبه معدوم أصلًا
+   لأن مفتاح `anon` علني ومضمَّن في حزمة الواجهة. **البديل الصحيح:** نشر نسخة
+   الـ repo التي تضيف بوابة `MIZAN_BOOTSTRAP_SECRET`، بعد اختبار على بيئة تجريبية.
 2. **انحراف الإصدار:** النسخة المنشورة (v2) من `admin-users` **أقدم** من نسخة
    الـ repo فيه (`.ts` في الـ repo فيه بوابة `MIZAN_BOOTSTRAP_SECRET` غير
    موجودة في المنشور). أي أن تصلّبًا مكتوبًا لم يُنشر قط.
-3. **`anon`/`authenticated` ما زالا يملكان `TRUNCATE`/`REFERENCES`/`TRIGGER`
-   على جداول لم تُشمَل في §11** (مثل `tenants`، `tenant_members`). لم أوسّع
-   الإلغاء لأن `TRUNCATE` متاح للعميل يعني إمكانية إفراغ الجداول، وهو بند
-   يستحق هجرة مستقلة مع اختبار.
+3. **~~`TRUNCATE` متاح للعملاء~~ — أُغلق في `p0_10`.** سُحب
+   `TRUNCATE/REFERENCES/TRIGGER/MAINTAIN` من `anon` و`authenticated` على كل
+   جداول `public`، وسُحبت كل صلاحيات التسلسلات ثم مُنح `USAGE` فقط على
+   `tenant_records_revision_seq`. تحقق فعلي:
+   `has_table_privilege('authenticated','public.tenants','TRUNCATE') = false`،
+   `has_sequence_privilege(...,'UPDATE') = false`، ومع ذلك نجحت دورة push
+   حقيقية (revision 45) — أي أن الإدراج لا يزال يعمل.
+   ملاحظة مهمة: `TRUNCATE` لا يخضع لـ RLS إطلاقًا، لكنه **غير قابل للوصول عبر
+   PostgREST**، لذا كان خطرًا نظريًا لا ثغرة مستغَلّة.
 4. **`platform_admins` و`platform_billing_info` و`subscription_plans` ما زالت
    `{public}` في سياساتها** — تعمل عبر الدوال المساعدة، لكن الأفضل تضييقها إلى
    `authenticated` في هجرة لاحقة.
