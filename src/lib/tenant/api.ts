@@ -1,5 +1,6 @@
 import { getSupabaseClient, SUPABASE_ANON_KEY, SUPABASE_URL } from "../supabase/client.ts";
 import type { Currency, Data } from "../finance/types.ts";
+import { splitRemoteRecords, validateEntityPayload } from "./entity-payloads.ts";
 import { cleanDisplayContact, normalizeSubscriberIdentity } from "./identity.ts";
 import {
   enqueueTenantOutboxOps,
@@ -735,10 +736,34 @@ export async function syncTenantWithSupabase(
   const rejected: SyncRejectedItem[] = [];
   let pushedCount = 0;
 
-  if (outbox.length > 0) {
+  // Envelope + per-entity payload schema check before upload. A record that
+  // cannot be read is reported through the existing rejected channel and stays
+  // in the outbox (so a user edit can rescue it), but never reaches the server.
+  const pushable: OutboxOp[] = [];
+  for (const op of outbox) {
+    const isTombstone = op.deletedAtMs !== null && op.deletedAtMs !== undefined;
+    if (isTombstone) {
+      pushable.push(op);
+      continue;
+    }
+    const validation = validateEntityPayload(op.entityType, op.payload);
+    if (validation.ok) {
+      pushable.push(op);
+    } else {
+      rejected.push({
+        entityType: op.entityType,
+        entityId: op.entityId,
+        error: validation.error,
+        code: "INVALID_PAYLOAD",
+        at: Date.now(),
+      });
+    }
+  }
+
+  if (pushable.length > 0) {
     const { data: pushResult, error: pushErr } = await sb.rpc("sync_push_tenant_records", {
       p_tenant_id: tenantId,
-      p_ops: outbox,
+      p_ops: pushable,
     });
     if (pushErr) {
       throw new Error(pushErr.message);
@@ -769,6 +794,8 @@ export async function syncTenantWithSupabase(
       });
     }
 
+    // Keep unvalidated ops in the outbox: `doneKeys` only holds ops the server
+    // actually settled, so a locally rejected record is never silently dropped.
     const remaining = outbox.filter((op) => !doneKeys.has(`${op.entityType}:${op.entityId}`));
     saveTenantOutbox(tenantId, remaining, storage);
   }
@@ -790,8 +817,21 @@ export async function syncTenantWithSupabase(
   if (pullErr) throw new Error(pullErr.message);
 
   const rows = (remoteRows ?? []) as RemoteTenantRecord[];
+  // Server data is validated too: a malformed or mis-keyed row is reported and
+  // skipped instead of being merged into the workspace.
+  const { valid: mergeableRows, invalid: invalidRows } = splitRemoteRecords(rows);
+  for (const { row, error } of invalidRows) {
+    rejected.push({
+      entityType: String(row.entity_type),
+      entityId: String(row.entity_id),
+      error,
+      code: "INVALID_REMOTE_PAYLOAD",
+      at: Date.now(),
+    });
+  }
+
   const remainingOutbox = loadTenantOutbox(tenantId, storage);
-  const mergedData = mergeRemoteRecordsIntoData(localData, rows, remainingOutbox);
+  const mergedData = mergeRemoteRecordsIntoData(localData, mergeableRows, remainingOutbox);
 
   if (rows.length > 0) {
     const maxServerTs = rows[rows.length - 1]?.server_updated_at;

@@ -321,7 +321,7 @@ export function TenantSettingsScreen() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-[var(--red)] font-bold text-[13px]">
               <AlertTriangle className="w-4 h-4" />
-              {isAr ? "عمليات مرفوضة من الخادم" : "Server-Rejected Offline Operations"}
+              {isAr ? "عمليات مرفوضة أثناء المزامنة" : "Rejected Offline Operations"}
             </div>
             <button type="button" onClick={dismissRejectedSync} className="text-[11px] underline">
               {isAr ? "إخفاء" : "Dismiss"}
