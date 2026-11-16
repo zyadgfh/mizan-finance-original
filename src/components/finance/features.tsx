@@ -12,7 +12,7 @@ import {
   Printer,
 } from "lucide-react";
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AppleWalletCard, walletKindLabelText } from "@/components/finance/apple-cards";
 import { useMizan } from "@/components/finance/context";
@@ -650,18 +650,36 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
   const [lockMessage, setLockMessage] = useState<string | null>(null);
   const [bioBusy, setBioBusy] = useState(false);
   const { ref: dotsRef, triggerShake } = usePinShake();
-  const canBio = Boolean(security.biometricEnabled && security.biometricCredentialId);
+  const credentialId = security.biometricCredentialId;
+  const canBio = Boolean(security.biometricEnabled && credentialId);
 
   async function tryBiometric() {
-    if (!security.biometricCredentialId || bioBusy) return;
+    if (!credentialId || bioBusy) return;
     setBioBusy(true);
     try {
-      const ok = await verifyBiometricCredential(security.biometricCredentialId);
+      const ok = await verifyBiometricCredential(credentialId);
       if (ok) onUnlock();
     } finally {
       setBioBusy(false);
     }
   }
+
+  // Offer the sensor as soon as the app locks, the way banking apps do. The
+  // callback is held in a ref because the parent recreates it on every render;
+  // depending on it directly would re-open the prompt on each parent update.
+  const unlockRef = useRef(onUnlock);
+  unlockRef.current = onUnlock;
+  const autoPromptedRef = useRef(false);
+  useEffect(() => {
+    if (!canBio || !credentialId || autoPromptedRef.current) return;
+    autoPromptedRef.current = true;
+    const timer = setTimeout(() => {
+      void verifyBiometricCredential(credentialId).then((ok) => {
+        if (ok) unlockRef.current();
+      });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [canBio, credentialId]);
 
   async function press(key: string) {
     if (!key) return;

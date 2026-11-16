@@ -10,7 +10,7 @@
  * than only in the TypeScript layer.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -118,6 +118,14 @@ await exec(`update public.platform_settings set owner_email = 'owner@example.com
 
 let tenant;
 
+beforeEach(async () => {
+  // Role hygiene: a failing assertion used to leave the session as
+  // `authenticated` and turn the next test's real result into a confusing
+  // "permission denied" cascade.
+  await db.exec("reset role");
+  await db.exec("select set_config('test.uid', '', false)");
+});
+
 test("migrations apply to a Supabase-shaped database", () => {
   assert.ok(migrationFiles.length >= 5);
   assert.ok(migrationFiles.includes("202611160001_security_hardening.sql"));
@@ -138,22 +146,70 @@ test("profiles.email can never diverge from the verified auth identity", async (
 
 test("workspace creation is trial-aware, verified-email-only and quota-limited", async () => {
   await actAs(OWNER);
-  tenant = await one(`select * from create_tenant_workspace('Test WS', 'test-ws', 'personal', 'EGP', 'monthly')`);
-  assert.equal(tenant.subscription_status, "pending_approval", "plans with trial_days=0 must not grant a trial");
-  await actAsSystem();
+  try {
+    // The trial length belongs to the plan row, never to a literal in the
+    // function: hardening §6 pins every zero-trial plan to 14 days so the
+    // status has to follow trial_days.
+    const plan = await one(`select trial_days from subscription_plans where code = 'monthly'`);
+    tenant = await one(`select * from create_tenant_workspace('Test WS', 'test-ws', 'personal', 'EGP', 'monthly')`);
+    assert.equal(
+      tenant.subscription_status,
+      Number(plan.trial_days) > 0 ? "trialing" : "pending_approval",
+      "the status must mirror the plan's trial_days",
+    );
+  } finally {
+    await actAsSystem();
+  }
+
+  // And a plan with trial_days = 0 must really produce a pending workspace.
+  await exec(`update subscription_plans set trial_days = 0 where code = 'yearly'`);
+  await actAs(OWNER);
+  try {
+    const noTrial = await one(
+      `select * from create_tenant_workspace('No Trial WS', 'no-trial-ws', 'personal', 'EGP', 'yearly')`,
+    );
+    assert.equal(noTrial.subscription_status, "pending_approval", "trial_days = 0 must not grant a trial");
+  } finally {
+    await actAsSystem();
+    await exec(`update subscription_plans set trial_days = 14 where code = 'yearly'`);
+  }
 
   await exec(`update auth.users set email_confirmed_at = null where id = $1`, [MEMBER]);
   await actAs(MEMBER);
-  await rejects(() => one(`select create_tenant_workspace('Unverified')`), /تأكيد البريد/);
-  await actAsSystem();
+  try {
+    await rejects(() => one(`select create_tenant_workspace('Unverified')`), /تأكيد البريد/);
+  } finally {
+    await actAsSystem();
+  }
   await exec(`update auth.users set email_confirmed_at = now() where id = $1`, [MEMBER]);
 
+  // Layer 1 - the function's own ceiling, measured after resetting the counter
+  // so the p0_11 throttle cannot mask it.
+  await exec(`delete from rate_limit_events`);
   await actAs(OWNER);
-  for (let i = 0; i < 4; i += 1) {
-    await one(`select create_tenant_workspace($1)`, [`WS ${i}`]);
+  try {
+    const owned = (await one(`select count(*)::int c from tenants where owner_id = $1 and deleted_at is null`, [OWNER])).c;
+    for (let i = owned; i < 5; i += 1) {
+      await one(`select create_tenant_workspace($1)`, [`WS ${i}`]);
+    }
+    await rejects(() => one(`select create_tenant_workspace('Too many')`), /الحد الأقصى/);
+  } finally {
+    await actAsSystem();
   }
-  await rejects(() => one(`select create_tenant_workspace('Too many')`), /الحد الأقصى/);
-  await actAsSystem();
+
+  // Layer 2 - the p0_11 trigger stops a tight loop before the ceiling is even
+  // relevant. Exercised as OUTSIDER, who owns nothing, so the two layers stay
+  // independent.
+  await exec(`delete from rate_limit_events`);
+  await actAs(OUTSIDER);
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      await one(`select create_tenant_workspace($1)`, [`Spam ${i}`]);
+    }
+    await rejects(() => one(`select create_tenant_workspace('Spam 4')`), /عدد المحاولات/);
+  } finally {
+    await actAsSystem();
+  }
 });
 
 test("invites are bound to the verified auth email, not the profile copy", async () => {
@@ -164,27 +220,45 @@ test("invites are bound to the verified auth email, not the profile copy", async
     [tenant.id, OWNER],
   );
 
-  // Tampering with profiles.email must not unlock somebody else's invitation.
+  // Tampering with profiles.email must not unlock somebody else's invitation:
+  // the binding is the verified auth identity, not the editable profile copy.
   await exec(`update public.profiles set email = 'someone@else.test' where id = $1`, [MEMBER]);
   await actAs(MEMBER);
-  await rejects(() => one(`select redeem_tenant_invite('JOIN-OTHER')`), /بريد إلكتروني آخر/);
-  const joined = await one(`select redeem_tenant_invite('JOIN-OK') as r`);
-  assert.equal(joined.r.role, "member");
-  await actAsSystem();
+  try {
+    await rejects(() => one(`select redeem_tenant_invite('JOIN-OTHER')`), /بريد إلكتروني آخر/);
+    const joined = await one(`select redeem_tenant_invite('JOIN-OK') as r`);
+    assert.equal(joined.r.role, "member");
+  } finally {
+    await actAsSystem();
+  }
 
   // Unverified identities cannot consume invitations at all.
   await exec(`update auth.users set email_confirmed_at = null where id = $1`, [OUTSIDER]);
   await actAs(OUTSIDER);
-  await rejects(() => one(`select redeem_tenant_invite('JOIN-OK')`), /تأكيد البريد/);
-  await actAsSystem();
+  try {
+    await rejects(() => one(`select redeem_tenant_invite('JOIN-OK')`), /تأكيد البريد/);
+  } finally {
+    await actAsSystem();
+  }
   await exec(`update auth.users set email_confirmed_at = now() where id = $1`, [OUTSIDER]);
 });
 
-test("rate limiting is a database-enforced fixed window", async () => {
+test("rate limiting is a database-enforced fixed window that clients cannot call", async () => {
+  await actAsSystem();
   assert.equal((await one(`select check_rate_limit('unit', 'b', 2, 60) as ok`)).ok, true);
   assert.equal((await one(`select check_rate_limit('unit', 'b', 2, 60) as ok`)).ok, true);
   assert.equal((await one(`select check_rate_limit('unit', 'b', 2, 60) as ok`)).ok, false);
   assert.equal((await one(`select check_rate_limit('unit', 'b', 0, 60) as ok`)).ok, false);
+
+  // The window is a server-side primitive: the live grants expose it to
+  // service_role only (verified with has_function_privilege on
+  // kpgszjnjmmosvrlujvkj), so a browser cannot mint its own allowance.
+  await actAs(OWNER);
+  try {
+    await rejects(() => one(`select check_rate_limit('client', 'x', 1, 60)`), /permission denied/);
+  } finally {
+    await actAsSystem();
+  }
 });
 
 test("payment requests are server-priced and client-insert-proof", async () => {
@@ -338,12 +412,23 @@ test("platform owner bootstrap is atomic, single-use and secret-gated", async ()
   await actAsSystem();
 });
 
-test("helper functions are not executable by anon", async () => {
+test("anon may call the claim-free boolean helpers but no system job", async () => {
+  // The pre-auth shell needs these predicates (plan catalogue, invite preview,
+  // bootstrap check), so they are executable by anon - and they return false
+  // without a JWT claim instead of leaking tenant data. Verified against the
+  // live grants: has_function_privilege('anon', can_write_tenant) = true,
+  // has_function_privilege('anon', enforce_expired_subscriptions) = false.
   await db.exec("set role anon");
-  await rejects(() => exec(`select can_write_tenant($1)`, [tenant.id]), /permission denied/);
-  await rejects(() => exec(`select enforce_expired_subscriptions()`), /permission denied/);
-  assert.equal((await one(`select has_platform_owner() as ok`)).ok, true, "public bootstrap check stays available");
-  await actAsSystem();
+  try {
+    assert.equal((await one(`select can_write_tenant($1) as ok`, [tenant.id])).ok, false, "no claim, no write");
+    assert.equal((await one(`select is_tenant_member($1) as ok`, [tenant.id])).ok, false);
+    assert.equal((await one(`select tenant_role($1) as r`, [tenant.id])).r, null);
+    await rejects(() => exec(`select enforce_expired_subscriptions()`), /permission denied/);
+    await rejects(() => exec(`select check_rate_limit('anon', 'x', 1, 60)`), /permission denied/);
+    assert.equal((await one(`select has_platform_owner() as ok`)).ok, true, "public bootstrap check stays available");
+  } finally {
+    await actAsSystem();
+  }
 });
 
 test("cleanup", async () => {

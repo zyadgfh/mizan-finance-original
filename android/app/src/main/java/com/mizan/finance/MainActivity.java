@@ -16,6 +16,9 @@ import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import androidx.activity.OnBackPressedCallback;
+import androidx.biometric.BiometricManager;
+import androidx.biometric.BiometricPrompt;
+import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -38,6 +41,101 @@ public class MainActivity extends BridgeActivity {
     );
 
     private volatile String pendingLaunchUrl = null;
+
+    /**
+     * A single biometric prompt may be open at a time. The WebView can fire the
+     * bridge repeatedly (double taps, retries after a timeout), and stacking
+     * prompts would let a stale callback unlock the app later.
+     */
+    private volatile boolean biometricInFlight = false;
+
+    private boolean biometricSensorAvailable() {
+        try {
+            return BiometricManager.from(this)
+                    .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                == BiometricManager.BIOMETRIC_SUCCESS;
+        } catch (Exception e) {
+            // No biometric hardware, nothing enrolled, or a vendor sensor that
+            // crashes BiometricManager: treat all three as "not available".
+            return false;
+        }
+    }
+
+    /**
+     * Starts the system biometric prompt and reports the outcome to
+     * `window.__mizanBiometric(requestId, ok, code)`.
+     *
+     * Returns false when the request was refused immediately (untrusted origin,
+     * bad id, or a prompt already open) so the caller can fail closed without
+     * waiting for a callback that will never arrive.
+     */
+    private boolean startBiometricPrompt(String requestId) {
+        if (requestId == null || requestId.trim().isEmpty()) return false;
+        if (biometricInFlight) return false;
+        biometricInFlight = true;
+        final String id = requestId;
+        runOnUiThread(() -> showBiometricPrompt(id));
+        return true;
+    }
+
+    private void showBiometricPrompt(final String requestId) {
+        final java.util.concurrent.atomic.AtomicBoolean settled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+        try {
+            BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder()
+                .setTitle(getString(R.string.biometric_title))
+                .setSubtitle(getString(R.string.biometric_subtitle))
+                .setNegativeButtonText(getString(R.string.biometric_cancel))
+                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                .setConfirmationRequired(false)
+                .build();
+
+            BiometricPrompt prompt = new BiometricPrompt(
+                this,
+                ContextCompat.getMainExecutor(this),
+                new BiometricPrompt.AuthenticationCallback() {
+                    @Override
+                    public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) {
+                        settle(true, "ok");
+                    }
+
+                    @Override
+                    public void onAuthenticationError(int errorCode, CharSequence errString) {
+                        settle(false, "error_" + errorCode);
+                    }
+
+                    @Override
+                    public void onAuthenticationFailed() {
+                        // A single non-matching finger; the system prompt stays up
+                        // and the user may retry, so this is not a final answer.
+                    }
+
+                    private void settle(boolean ok, String code) {
+                        if (!settled.compareAndSet(false, true)) return;
+                        biometricInFlight = false;
+                        deliverBiometricResult(requestId, ok, code);
+                    }
+                }
+            );
+            prompt.authenticate(info);
+        } catch (Exception e) {
+            if (settled.compareAndSet(false, true)) {
+                biometricInFlight = false;
+                deliverBiometricResult(requestId, false, "exception");
+            }
+        }
+    }
+
+    private void deliverBiometricResult(String requestId, boolean ok, String code) {
+        WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+        if (webView == null) return;
+        final String js = "window.__mizanBiometric&&window.__mizanBiometric("
+            + JSONObject.quote(requestId == null ? "" : requestId)
+            + "," + (ok ? "true" : "false")
+            + "," + JSONObject.quote(code == null ? "" : code)
+            + ");";
+        runOnUiThread(() -> webView.evaluateJavascript(js, null));
+    }
 
     private boolean isTrustedWebOrigin() {
         WebView webView = getBridge() != null ? getBridge().getWebView() : null;
@@ -159,6 +257,24 @@ public class MainActivity extends BridgeActivity {
     }
 
     private final class MizanNativeBridge {
+        /**
+         * Android WebView does not implement WebAuthn, so the web layer cannot use
+         * navigator.credentials here. These two methods expose the platform
+         * BiometricPrompt (fingerprint / strong face) behind the same trusted-origin
+         * check as every other bridge call.
+         */
+        @JavascriptInterface
+        public boolean biometricAvailable() {
+            if (!isTrustedWebOrigin()) return false;
+            return MainActivity.this.biometricSensorAvailable();
+        }
+
+        @JavascriptInterface
+        public boolean authenticateBiometric(String requestId) {
+            if (!isTrustedWebOrigin()) return false;
+            return MainActivity.this.startBiometricPrompt(requestId);
+        }
+
         private boolean dispatchShareBytes(String filename, String mimeType, byte[] bytes) {
             try {
                 String safeName = (filename == null || filename.trim().isEmpty())
