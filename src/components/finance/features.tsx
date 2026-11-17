@@ -50,6 +50,8 @@ export function ReportScreen() {
   const data = useFinance();
   const { lang, numeralStyle, analyticsEnabled, isRtl, dir, t, catName } = useI18n();
   const [sharingImg, setSharingImg] = useState(false);
+  const [redactSharedDetails, setRedactSharedDetails] = useState(true);
+  const reportPrivacy = { redactSensitiveDetails: redactSharedDetails };
   const report = reportMetrics(data, month, lang, numeralStyle);
   const parts = report.categories;
   const total = parts.reduce((s, p) => s + p.value, 0);
@@ -91,13 +93,26 @@ export function ReportScreen() {
       </div>
 
       <Section title={lang === "en" ? "Export & Share" : "التصدير والمشاركة"}>
+        <label className="mx-4 mb-3 flex min-h-11 cursor-pointer items-center gap-3 rounded-cell bg-fill px-4 text-sub">
+          <input
+            type="checkbox"
+            checked={redactSharedDetails}
+            onChange={(event) => setRedactSharedDetails(event.target.checked)}
+            className="h-4 w-4 accent-[var(--tint)]"
+          />
+          <span>
+            {lang === "en"
+              ? "Redact people names, phone numbers, and descriptions in exports"
+              : "إخفاء أسماء الأشخاص وأرقامهم وأوصاف الديون في الملفات المشاركة"}
+          </span>
+        </label>
         <div className="grid grid-cols-2 gap-2 px-4">
           <PillButton
             tone="tint"
             disabled={sharingImg}
             onClick={() => {
               setSharingImg(true);
-              void shareMonthlyReportImage(snapshot, month, lang, numeralStyle)
+              void shareMonthlyReportImage(snapshot, month, lang, numeralStyle, reportPrivacy)
                 .then(() =>
                   toast.success(
                     lang === "en" ? "Ready to share or save as PNG" : "جاهز للمشاركة أو الحفظ كصورة PNG",
@@ -123,7 +138,7 @@ export function ReportScreen() {
           <PillButton
             tone="gray"
             onClick={() => {
-              const mode = exportMonthlyReportPdf(snapshot, month, lang, numeralStyle);
+              const mode = exportMonthlyReportPdf(snapshot, month, lang, numeralStyle, reportPrivacy);
               toast(
                 mode === "printed"
                   ? lang === "en"
@@ -141,7 +156,7 @@ export function ReportScreen() {
           <PillButton
             tone="gray"
             onClick={() => {
-              exportMonthlyReportCsv(snapshot, month, lang, numeralStyle);
+              exportMonthlyReportCsv(snapshot, month, lang, numeralStyle, reportPrivacy);
               toast.success(lang === "en" ? "Excel (CSV) report exported" : "تم تصدير تقرير Excel (CSV)");
             }}
           >
@@ -151,7 +166,7 @@ export function ReportScreen() {
           <PillButton
             tone="gray"
             onClick={() => {
-              exportMonthlyReportJson(snapshot, month, lang, numeralStyle);
+              exportMonthlyReportJson(snapshot, month, lang, numeralStyle, reportPrivacy);
               toast.success(lang === "en" ? "JSON report exported" : "تم تصدير التقرير بصيغة JSON");
             }}
           >

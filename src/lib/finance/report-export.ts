@@ -4,6 +4,25 @@ import { getUiPrefs, type AppLanguage, type NumeralStyle } from "./prefs.ts";
 import { downloadExportBlob } from "./store.ts";
 import type { Currency, Data } from "./types.ts";
 
+export type ReportPrivacyOptions = { redactSensitiveDetails?: boolean };
+
+function reportDataView(data: Data, privacy: ReportPrivacyOptions = {}, lang: AppLanguage = "ar"): Data {
+  if (!privacy.redactSensitiveDetails) return data;
+  const personLabel = lang === "en" ? "Person" : "شخص";
+  const debtLabel = lang === "en" ? "Debt" : "دين";
+  return {
+    ...data,
+    people: data.people.map((person, index) => ({
+      ...person,
+      name: `${personLabel} ${index + 1}`,
+      phone: "",
+      note: "",
+    })),
+    debts: data.debts.map((debt, index) => ({ ...debt, title: `${debtLabel} ${index + 1}`, note: "" })),
+    recurring: data.recurring.map((item) => ({ ...item, note: "" })),
+  };
+}
+
 function csvCell(value: string | number) {
   let s = String(value ?? "");
   if (typeof value === "string" && /^[=+\-@\t\r]/.test(s)) {
@@ -18,8 +37,10 @@ export function buildMonthlyReportJson(
   month: string,
   lang: AppLanguage = getUiPrefs().language,
   numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  privacy: ReportPrivacyOptions = {},
 ): string {
-  const report = reportMetrics(data, month, lang, numeralStyle);
+  const safeData = reportDataView(data, privacy, lang);
+  const report = reportMetrics(safeData, month, lang, numeralStyle);
   const { analyticsEnabled } = getUiPrefs();
   return JSON.stringify(
     {
@@ -41,8 +62,9 @@ export function exportMonthlyReportJson(
   month: string,
   lang: AppLanguage = getUiPrefs().language,
   numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  privacy: ReportPrivacyOptions = {},
 ): void {
-  const json = buildMonthlyReportJson(data, month, lang, numeralStyle);
+  const json = buildMonthlyReportJson(data, month, lang, numeralStyle, privacy);
   downloadExportBlob(new Blob([json], { type: "application/json;charset=utf-8" }), `mizan-report-${month}.json`);
 }
 
@@ -51,8 +73,10 @@ export function buildMonthlyReportCsv(
   month: string,
   lang: AppLanguage = getUiPrefs().language,
   numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  privacy: ReportPrivacyOptions = {},
 ): string {
-  const report = reportMetrics(data, month, lang, numeralStyle);
+  const safeData = reportDataView(data, privacy, lang);
+  const report = reportMetrics(safeData, month, lang, numeralStyle);
   const en = lang === "en";
   const lines: string[] = [
     [en ? "Mizan Monthly Report" : "تقرير ميزان الشهري", report.monthLabel, data.currency].map(csvCell).join(","),
@@ -101,8 +125,9 @@ export function exportMonthlyReportCsv(
   month: string,
   lang: AppLanguage = getUiPrefs().language,
   numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  privacy: ReportPrivacyOptions = {},
 ): void {
-  const csv = buildMonthlyReportCsv(data, month, lang, numeralStyle);
+  const csv = buildMonthlyReportCsv(data, month, lang, numeralStyle, privacy);
   downloadExportBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), `mizan-report-${month}.csv`);
 }
 
@@ -119,8 +144,10 @@ export function buildMonthlyReportHtml(
   month: string,
   lang: AppLanguage = getUiPrefs().language,
   numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  privacy: ReportPrivacyOptions = {},
 ): string {
-  const report = reportMetrics(data, month, lang, numeralStyle);
+  const safeData = reportDataView(data, privacy, lang);
+  const report = reportMetrics(safeData, month, lang, numeralStyle);
   const en = lang === "en";
   const dir = en ? "ltr" : "rtl";
   const sym = currencySymbol(data.currency, lang);
@@ -219,8 +246,9 @@ export function exportMonthlyReportPdf(
   month: string,
   lang: AppLanguage = getUiPrefs().language,
   numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  privacy: ReportPrivacyOptions = {},
 ): "printed" | "downloaded" {
-  const html = buildMonthlyReportHtml(data, month, lang, numeralStyle);
+  const html = buildMonthlyReportHtml(data, month, lang, numeralStyle, privacy);
   const nativeBridge = (
     window as Window & {
       MizanNative?: { shareFile?: (name: string, mimeType: string, content: string) => boolean };
@@ -275,8 +303,10 @@ export async function renderMonthlyReportPng(
   month: string,
   lang: AppLanguage = getUiPrefs().language,
   numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  privacy: ReportPrivacyOptions = {},
 ): Promise<Blob> {
-  const report = reportMetrics(data, month, lang, numeralStyle);
+  const safeData = reportDataView(data, privacy, lang);
+  const report = reportMetrics(safeData, month, lang, numeralStyle);
   const en = lang === "en";
   const canvas = document.createElement("canvas");
   canvas.width = 1080;
@@ -416,8 +446,9 @@ export async function shareMonthlyReportImage(
   month: string,
   lang: AppLanguage = getUiPrefs().language,
   numeralStyle: NumeralStyle = getUiPrefs().numeralStyle,
+  privacy: ReportPrivacyOptions = {},
 ): Promise<void> {
-  const blob = await renderMonthlyReportPng(data, month, lang, numeralStyle);
+  const blob = await renderMonthlyReportPng(data, month, lang, numeralStyle, privacy);
   const filename = `mizan-report-${month}.png`;
   const nativeBridge = (
     window as Window & {

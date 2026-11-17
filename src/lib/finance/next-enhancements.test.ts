@@ -190,6 +190,24 @@ test("on-device monthly analytics computes daily avg, top days, increased catego
   assert.equal(analytics.increasedCategories[0]?.pctIncrease, 200);
 });
 
+test("shareable reports can redact person names, phone numbers, and debt descriptions", () => {
+  const data = seedData();
+  const month = currentMonth();
+  const privacy = { redactSensitiveDetails: true };
+  const csv = buildMonthlyReportCsv(data, month, "ar", "latn", privacy);
+  const json = JSON.parse(buildMonthlyReportJson(data, month, "ar", "latn", privacy)) as { debtPeople: Array<{ person: { name: string; phone: string } }> };
+  const html = buildMonthlyReportHtml(data, month, "ar", "latn", privacy);
+
+  assert.equal(csv.includes("أحمد عادل"), false);
+  assert.equal(csv.includes("01000000001"), false);
+  assert.equal(csv.includes("سلفة سفر"), false);
+  assert.equal(JSON.stringify(json).includes("أحمد عادل"), false);
+  assert.equal(JSON.stringify(json).includes("01000000001"), false);
+  assert.equal(html.includes("أحمد عادل"), false);
+  assert.equal(html.includes("سلفة سفر"), false);
+  assert.ok(json.debtPeople.some((row) => row.person.name.startsWith("شخص ")));
+});
+
 test("analytics opt-out excludes analytics payload from exported report JSON while preserving primary Arabic default", () => {
   installMemoryStorage();
   assert.equal(DEFAULT_UI_PREFS.language, "ar");
@@ -251,6 +269,46 @@ test("CSV parser, auto column mapping, multi-currency preview, and bulk import",
   const exportedCsv = buildMonthlyReportCsv(useFinance.getState(), "2026-11", "en", "latn");
   assert.equal(exportedCsv.includes("Mizan Monthly Report"), true);
   assert.equal(typeof exportCsv, "function");
+});
+
+test("CSV import skips duplicate records from the ledger and within the selected file by default", () => {
+  const base = { ...seedData(), txns: [] };
+  const csv = [
+    "Date,Type,Amount,Currency,Category,Note",
+    "2026-11-12,expense,45,EGP,طعام,قهوة مكررة",
+    "2026-11-12,expense,45,EGP,طعام,قهوة مكررة",
+  ].join("\n");
+  const preview = previewCsvImport(csv, base, { defaultWalletId: "w-cash", defaultCurrency: "EGP" });
+  assert.equal(preview.validInputs.length, 1);
+  assert.equal(preview.skippedRows.filter((row) => row.reason === "duplicate").length, 1);
+
+  const existing = {
+    ...base,
+    txns: [{
+      id: "already-imported",
+      kind: "expense" as const,
+      amount: 45,
+      currency: "EGP" as const,
+      categoryId: "c-food",
+      walletId: "w-cash",
+      note: "قهوة مكررة",
+      date: "2026-11-12",
+      createdAt: 1,
+    }],
+  };
+  const ledgerPreview = previewCsvImport(csv.split("\n").slice(0, 2).join("\n"), existing, {
+    defaultWalletId: "w-cash",
+    defaultCurrency: "EGP",
+  });
+  assert.equal(ledgerPreview.validInputs.length, 0);
+  assert.equal(ledgerPreview.skippedRows[0]?.reason, "duplicate");
+
+  const explicitlyAllowed = previewCsvImport(csv, base, {
+    defaultWalletId: "w-cash",
+    defaultCurrency: "EGP",
+    skipDuplicates: false,
+  });
+  assert.equal(explicitlyAllowed.validInputs.length, 2);
 });
 
 test("privacy-safe error log strips amounts, notes, phones, emails, and people names", () => {

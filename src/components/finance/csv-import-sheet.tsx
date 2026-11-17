@@ -19,6 +19,7 @@ export function CsvImportSheet() {
   const [defaultWalletId, setDefaultWalletId] = useState(data.wallets[0]?.id ?? "w-cash");
   const [defaultCurrency, setDefaultCurrency] = useState<Currency>(data.currency);
   const [colOverride, setColOverride] = useState<Partial<CsvColumnMap>>({});
+  const [includeDuplicates, setIncludeDuplicates] = useState(false);
 
   const preview = useMemo(
     () =>
@@ -26,9 +27,11 @@ export function CsvImportSheet() {
         columnMap: colOverride,
         defaultWalletId,
         defaultCurrency,
+        skipDuplicates: !includeDuplicates,
       }),
-    [csvText, data, colOverride, defaultWalletId, defaultCurrency],
+    [csvText, data, colOverride, defaultWalletId, defaultCurrency, includeDuplicates],
   );
+  const duplicateCount = preview.skippedRows.filter((row) => row.reason === "duplicate").length;
 
   function handleImport() {
     if (!preview.validInputs.length) {
@@ -176,6 +179,22 @@ export function CsvImportSheet() {
               : `معاينة: ${formatNumber(preview.validInputs.length, numeralStyle, lang)} صالحة · ${formatNumber(preview.skippedRows.length, numeralStyle, lang)} متخطاة`
           }
         >
+          {duplicateCount > 0 ? (
+            <p className="mx-4 mb-2 rounded-cell bg-fill px-3 py-2 text-caption text-label-2">
+              {lang === "en"
+                ? `${duplicateCount} duplicate transaction${duplicateCount === 1 ? "" : "s"} skipped`
+                : `تم تخطي ${formatNumber(duplicateCount, numeralStyle, lang)} حركة مكررة`}
+            </p>
+          ) : null}
+          <label className="mx-4 mb-3 flex min-h-10 cursor-pointer items-center gap-2 text-caption text-label-2">
+            <input
+              type="checkbox"
+              checked={includeDuplicates}
+              onChange={(event) => setIncludeDuplicates(event.target.checked)}
+              className="h-4 w-4 accent-[var(--tint)]"
+            />
+            <span>{lang === "en" ? "Allow duplicate transactions" : "السماح باستيراد الحركات المكررة"}</span>
+          </label>
           {preview.validInputs.length ? (
             <div className="surface-card mx-4 overflow-hidden rounded-cell">
               {preview.validInputs.slice(0, 6).map((item, idx) => {

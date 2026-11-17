@@ -475,7 +475,7 @@ Deno.serve(async (req: Request) => {
     const notes = String(payload.notes ?? "").trim();
     const contactEmail = String(payload.email ?? "").trim().toLowerCase();
 
-    const ipAllowed = await allowRequest("register_subscriber_ip", `ip:${ipHash}`, 10, 3600);
+    const ipAllowed = await allowRequest("register_subscriber_ip", `ip:${ipHash}`, 10, 3600, true);
     if (!ipAllowed) {
       return jsonResponse(req, { error: "عدد محاولات التسجيل كبير جداً، حاول لاحقاً" }, 429);
     }
@@ -489,7 +489,7 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const identifierAllowed = await allowRequest("register_subscriber_id", identity.authEmail, 3, 3600);
+    const identifierAllowed = await allowRequest("register_subscriber_id", identity.authEmail, 3, 3600, true);
     if (!identifierAllowed) {
       return jsonResponse(req, { error: "تم إنشاء محاولات تسجيل متعددة لهذا الحساب، حاول لاحقاً" }, 429);
     }
@@ -772,7 +772,7 @@ Deno.serve(async (req: Request) => {
     const proofDataUrl = String(payload.proofDataUrl ?? "");
     const notes = String(payload.notes ?? "").trim();
 
-    const allowed = await allowRequest("submit_renewal_payment", `user:${callerId}`, 6, 3600);
+    const allowed = await allowRequest("submit_renewal_payment", `user:${callerId}`, 6, 3600, true);
     if (!allowed) {
       return jsonResponse(req, { error: "عدد إرسال الطلبات كبير جداً، حاول لاحقاً" }, 429);
     }

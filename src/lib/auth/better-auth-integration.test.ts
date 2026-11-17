@@ -284,7 +284,7 @@ describe("Better Auth + PGLite integration", () => {
 
   it("handles OAuth error callbacks, rejects unauthenticated account linking, and enforces preview vs deployed origin policies", async () => {
     const oauthErr = await previewAuth.handler(
-      new Request("https://abc123.grok-sandbox.com/api/auth/oauth2/callback/grok-google?error=access_denied", {
+      new Request("https://abc123.grok-sandbox.com/api/auth/callback/grok-google?error=access_denied", {
         headers: { host: "abc123.grok-sandbox.com" },
       }),
     );
@@ -292,14 +292,14 @@ describe("Better Auth + PGLite integration", () => {
     assert.equal(oauthErr.headers.get("set-auth-token"), null);
 
     const oauthInit = await previewAuth.handler(
-      new Request("https://demo99.grok-sandbox.com/api/auth/sign-in/oauth2", {
+      new Request("https://demo99.grok-sandbox.com/api/auth/sign-in/social", {
         method: "POST",
         headers: {
           "content-type": "application/json",
           origin: "https://demo99.grok-sandbox.com",
           host: "demo99.grok-sandbox.com",
         },
-        body: JSON.stringify({ providerId: "grok-google", callbackURL: "/" }),
+        body: JSON.stringify({ provider: "grok-google", callbackURL: "/" }),
       }),
     );
     assert.equal(oauthInit.status, 200);
@@ -308,10 +308,10 @@ describe("Better Auth + PGLite integration", () => {
     assert.ok(initJson.url?.includes("idp=google"));
 
     const linkFail = await previewAuth.handler(
-      new Request("http://localhost:8080/api/auth/oauth2/link", {
+      new Request("http://localhost:8080/api/auth/link-social", {
         method: "POST",
         headers: { "content-type": "application/json", origin: "http://localhost:8080" },
-        body: JSON.stringify({ providerId: "grok-x", callbackURL: "/" }),
+        body: JSON.stringify({ provider: "grok-x", callbackURL: "/" }),
       }),
     );
     assert.ok(linkFail.status >= 400);

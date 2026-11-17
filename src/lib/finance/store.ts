@@ -17,6 +17,7 @@ import {
   todayISO,
 } from "./logic.ts";
 import { writePinHash } from "./pin.ts";
+import { recordBackupExport } from "./backup-reminder.ts";
 import { clearReceipts, exportAllReceipts, importAllReceipts } from "./receipts.ts";
 import { overwriteAndClearLocalKeys } from "./security.ts";
 import { seedData } from "./seed.ts";
@@ -1269,6 +1270,7 @@ export function exportData() {
     new Blob([JSON.stringify(pickFinanceData(useFinance.getState()), null, 2)], { type: "application/json" }),
     "mizan-backup.json",
   );
+  recordBackupExport();
 }
 
 export async function exportDataAsync(options: { includeReceipts?: boolean; passphrase?: string } = {}) {
@@ -1282,9 +1284,11 @@ export async function exportDataAsync(options: { includeReceipts?: boolean; pass
       new Blob([JSON.stringify(encrypted, null, 2)], { type: "application/json" }),
       "mizan-backup-encrypted.json",
     );
+    recordBackupExport();
     return;
   }
   downloadExportBlob(new Blob([jsonText], { type: "application/json" }), "mizan-backup.json");
+  recordBackupExport();
 }
 
 function csvCell(value: string | number) {
