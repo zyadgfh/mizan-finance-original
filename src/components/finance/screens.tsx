@@ -36,6 +36,7 @@ import {
   Segment,
 } from "@/components/finance/ui";
 import { clearErrorLogs, loadErrorLogs } from "@/lib/finance/error-log";
+import { useBackupReminderStatus } from "@/lib/finance/backup-reminder";
 import { useI18n } from "@/lib/finance/i18n";
 import {
   budgetAlerts,
@@ -1358,6 +1359,7 @@ export function MoreScreen() {
   const [pendingImportJson, setPendingImportJson] = useState<string | null>(null);
   const [importPass, setImportPass] = useState("");
   const uiPrefs = useUiPrefs();
+  const backupStatus = useBackupReminderStatus();
   const [errorLogs, setErrorLogs] = useState(() => loadErrorLogs());
   const latestPerf = useMemo(() => getLatestPerfSample(), []);
 
@@ -1797,6 +1799,27 @@ export function MoreScreen() {
 
       <Section title={lang === "en" ? "Backup, Import & Export" : "نسخة احتياطية واستيراد وتصدير"}>
         <Group>
+          <Row
+            title={lang === "en" ? "Backup reminder" : "تذكير النسخة الاحتياطية"}
+            sub={
+              backupStatus.lastBackupAt === null
+                ? lang === "en"
+                  ? "No backup exported on this device yet"
+                  : "لم تُصدّر نسخة احتياطية من هذا الجهاز بعد"
+                : backupStatus.due
+                  ? lang === "en"
+                    ? `Last export ${backupStatus.ageDays} days ago — backup is due`
+                    : `آخر تصدير منذ ${formatNumber(backupStatus.ageDays ?? 0, numeralStyle, lang)} يوماً — يُنصح بنسخة جديدة`
+                  : lang === "en"
+                    ? `Last export ${backupStatus.ageDays} days ago`
+                    : `آخر تصدير منذ ${formatNumber(backupStatus.ageDays ?? 0, numeralStyle, lang)} يوماً`
+            }
+            trailing={
+              <PillButton tone={backupStatus.due ? "tint" : "gray"} onClick={() => exportData()}>
+                {lang === "en" ? "Export now" : "نسخ الآن"}
+              </PillButton>
+            }
+          />
           <Row title={lang === "en" ? "Export JSON" : "تصدير JSON"} sub={lang === "en" ? "Lightweight ledger backup" : "نسخة خفيفة للبيانات"} chevron onClick={() => exportData()} />
           <Row
             title={lang === "en" ? "Export JSON with Receipts" : "تصدير JSON مع الإيصالات"}
@@ -1847,7 +1870,7 @@ export function MoreScreen() {
             sub={monthLabel(month, lang, numeralStyle)}
             chevron
             onClick={() => {
-              exportMonthlyReportPdf(pickFinanceData(data), month, lang, numeralStyle);
+              exportMonthlyReportPdf(pickFinanceData(data), month, lang, numeralStyle, { redactSensitiveDetails: true });
               toast(lang === "en" ? "Report ready for print / PDF" : "جُهّز التقرير للطباعة / PDF");
             }}
           />

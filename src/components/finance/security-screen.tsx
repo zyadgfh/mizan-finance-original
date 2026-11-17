@@ -252,7 +252,7 @@ export function SecurityScreen() {
               </span>
             }
             title="التخزين المحلي على جهازك"
-            sub="الحركات والديون والميزانيات في localStorage، صور الإيصالات في IndexedDB، وبصمة PIN أحادية الاتجاه SHA-256."
+            sub="الحركات والديون والميزانيات في localStorage، صور الإيصالات في IndexedDB، وبصمة PIN مشتقة بـ PBKDF2-SHA256 مع Salt عشوائي. قفل PIN لا يشفّر البيانات المحلية."
           />
           <Row
             leading={

@@ -184,6 +184,26 @@ function inferTxKind(rawKind: string, rawAmount: number): TxKind | "skip" {
   return rawAmount < 0 ? "expense" : "expense";
 }
 
+function transactionFingerprint(tx: {
+  kind: TxKind;
+  date: string;
+  amount: number;
+  currency?: Currency;
+  categoryId: string;
+  walletId?: string;
+  note: string;
+}, defaultCurrency: Currency): string {
+  return [
+    tx.kind,
+    tx.date,
+    round2(tx.amount),
+    tx.currency ?? defaultCurrency,
+    tx.categoryId,
+    tx.walletId || "w-cash",
+    normalizeSearch(tx.note),
+  ].join("|");
+}
+
 export function previewCsvImport(
   rawText: string,
   data: Pick<Data, "categories" | "wallets" | "txns" | "currency" | "exchangeRates">,
@@ -191,6 +211,7 @@ export function previewCsvImport(
     columnMap?: Partial<CsvColumnMap>;
     defaultWalletId?: string;
     defaultCurrency?: Currency;
+    skipDuplicates?: boolean;
   } = {},
 ): CsvImportPreview {
   const { rows, delimiter } = parseCsvRows(rawText);
@@ -221,6 +242,7 @@ export function previewCsvImport(
 
   const validInputs: TxInput[] = [];
   const skippedRows: CsvSkippedRow[] = [];
+  const seenTransactions = new Set(data.txns.map((tx) => transactionFingerprint(tx, data.currency)));
 
   bodyRows.forEach((cols, idx) => {
     const lineNumber = (hasHeaderRow ? 2 : 1) + idx;
@@ -282,6 +304,18 @@ export function previewCsvImport(
         : Number.isFinite(parsedRate) && parsedRate > 0
           ? parsedRate
           : effectiveExchangeRate(rowCurrency, data.currency, data.exchangeRates);
+    const note = rawNote || rawCat || matchedCat.name;
+    const walletId = matchedWallet?.id ?? defaultWalletId;
+    const fingerprint = transactionFingerprint(
+      { kind, amount, currency: rowCurrency, categoryId: matchedCat.id, note, date: normalizedDate, walletId },
+      data.currency,
+    );
+
+    if (options.skipDuplicates !== false && seenTransactions.has(fingerprint)) {
+      skippedRows.push({ lineNumber, reason: "duplicate", raw: cols });
+      return;
+    }
+    seenTransactions.add(fingerprint);
 
     validInputs.push({
       kind,
@@ -290,9 +324,9 @@ export function previewCsvImport(
       exchangeRate: rowCurrency === data.currency ? undefined : exchangeRate,
       baseAmount: rowCurrency === data.currency ? undefined : round2(amount * exchangeRate),
       categoryId: matchedCat.id,
-      note: rawNote || rawCat || matchedCat.name,
+      note,
       date: normalizedDate,
-      walletId: matchedWallet?.id ?? defaultWalletId,
+      walletId,
       source: "manual",
       reported: true,
     });
