@@ -8,3 +8,4 @@ dist/
 android/local.properties
 *.apk
 .DS_Store
+exports/
