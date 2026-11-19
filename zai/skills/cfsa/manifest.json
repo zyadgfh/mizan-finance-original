@@ -1,0 +1,19 @@
+{
+  "skill": "cfsa",
+  "display_name": "Cloudflare & Project Security Audit",
+  "version": "1.0.0",
+  "source": "local-original",
+  "source_note": "No trusted third-party GitHub skill was located/vetted within this sandbox's network allowlist and available time. Built locally from the public Cloudflare API v4 reference per the task's explicit fallback instruction. Do not represent this as an installed GitHub skill.",
+  "external_repo": null,
+  "external_commit": null,
+  "external_sha256": null,
+  "license": "MIT (this repository's license)",
+  "created": "2026-11-19",
+  "entrypoint": "scripts/cfsa.mjs",
+  "default_mode": "read-only",
+  "capabilities": ["project-scope-audit", "cloudflare-scope-audit (requires CF_API_TOKEN + CF_ZONE_ID env vars)"],
+  "mutating_operations": false,
+  "files_imported_from_external_sources": [],
+  "sandbox_tested": true,
+  "test_notes": "scripts/cfsa.mjs executed in project-scope mode against this repository; see reports/cfsa/ for the generated run."
+}

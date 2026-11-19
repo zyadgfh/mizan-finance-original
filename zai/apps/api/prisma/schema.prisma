@@ -1,0 +1,169 @@
+// File: zai/apps/api/prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  displayName  String?
+  role         Role     @default(USER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions    RefreshToken[]
+  chats       Chat[]
+  attachments Attachment[]
+  usageEvents UsageEvent[]
+  auditEvents AuditEvent[]
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+// One row per issued refresh token (rotating family). Access tokens are
+// short-lived JWTs that are never persisted.
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique // sha256 of the opaque token — the raw value is never stored
+  familyId  String // rotation family; reuse-detection revokes the whole family
+  revoked   Boolean  @default(false)
+  userAgent String?
+  ip        String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([userId])
+  @@index([familyId])
+}
+
+model Chat {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String    @default("محادثة جديدة")
+  modelId   String
+  groupName String?
+  pinned    Boolean   @default(false)
+  archived  Boolean   @default(false)
+  trashedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  messages    Message[]
+  attachments Attachment[]
+
+  @@index([userId])
+  @@index([userId, trashedAt])
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum MessageStatus {
+  PENDING
+  STREAMING
+  DONE
+  ERROR
+  STOPPED
+}
+
+model Message {
+  id         String        @id @default(uuid())
+  chatId     String
+  chat       Chat          @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  role       MessageRole
+  content    String
+  modelId    String?
+  status     MessageStatus @default(DONE)
+  errorCode  String?
+  pinned     Boolean       @default(false)
+  rating     Int? // -1 | 1
+  // Safe processing summary ONLY — raw provider chain-of-thought/reasoning is
+  // NEVER persisted (see docs/security.md "Reasoning policy").
+  processingMs Int?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  editedAt   DateTime?
+
+  attachments Attachment[]
+
+  @@index([chatId])
+}
+
+model Attachment {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chatId     String?
+  chat       Chat?    @relation(fields: [chatId], references: [id], onDelete: SetNull)
+  messageId  String?
+  message    Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  objectKey  String // key in S3-compatible storage — the file itself never touches the DB
+  fileName   String
+  mimeType   String
+  sizeBytes  Int
+  scanStatus ScanStatus @default(PENDING)
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+}
+
+enum ScanStatus {
+  PENDING
+  OK
+  BLOCKED
+}
+
+model ModelDefinition {
+  id           String   @id // e.g. "gpt-5-nano" or "openai/gpt-5"
+  name         String
+  provider     String
+  category     String
+  speed        String
+  vision       Boolean  @default(false)
+  thinking     Boolean  @default(false)
+  recommended  Boolean  @default(false)
+  enabled      Boolean  @default(true)
+  updatedAt    DateTime @updatedAt
+}
+
+model UsageEvent {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  modelId   String
+  kind      String // "message" | "regenerate" | "attachment"
+  tokens    Int?
+  latencyMs Int?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// Audit trail for security-relevant actions. Never stores secrets or raw
+// message content — see docs/security.md.
+model AuditEvent {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String // e.g. "auth.login", "auth.refresh.reuse_detected", "cfsa.run"
+  metadata  Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([action, createdAt])
+}

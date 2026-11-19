@@ -12,9 +12,12 @@ const TARGETS = [
       path.join(ROOT, ".output", "public", "assets"),
       path.join(ROOT, "dist", "assets"),
     ],
-    // Budget in bytes (gzip): keeps initial route & index tight while accounting for React/TanStack/GSAP/crypto
+    // Budget in bytes (gzip): keeps initial route & index tight while accounting for React/TanStack/GSAP/crypto.
+    // Raised from 520KB -> 600KB when the Z-Ai rebuild (/zai route: chat UI,
+    // Markdown sanitization, 14 accessible sheets/popovers) was added as its
+    // own lazily-reachable chunk (~52KB gzip) — see docs/architecture.md.
     maxLargestChunkGzipBytes: 185 * 1024,
-    maxTotalJsGzipBytes: 520 * 1024,
+    maxTotalJsGzipBytes: 600 * 1024,
     minTotalCssRawBytes: 55 * 1024,
   },
   {

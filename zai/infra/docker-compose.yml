@@ -1,0 +1,42 @@
+# File: zai/infra/docker-compose.yml — local dev stack for the Z-Ai API
+# Usage: cd zai/infra && docker compose up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zai
+      POSTGRES_PASSWORD: zai_dev_password
+      POSTGRES_DB: zai
+    ports: ["5432:5432"]
+    volumes: ["zai_pg_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Optional local S3-compatible storage for attachment presigned uploads.
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: zai_minio
+      MINIO_ROOT_PASSWORD: zai_minio_password
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["zai_minio_data:/data"]
+
+volumes:
+  zai_pg_data:
+  zai_minio_data:

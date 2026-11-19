@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as ZaiRouteImport } from './routes/zai'
 import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as TSlugRouteImport } from './routes/t.$slug'
 
@@ -30,6 +31,11 @@ const LoginRoute = LoginRouteImport.update({
   path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ZaiRoute = ZaiRouteImport.update({
+  id: '/zai',
+  path: '/zai',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const InviteTokenRoute = InviteTokenRouteImport.update({
   id: '/invite/$token',
   path: '/invite/$token',
@@ -45,6 +51,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/login': typeof LoginRoute
+  '/zai': typeof ZaiRoute
   '/invite/$token': typeof InviteTokenRoute
   '/t/$slug': typeof TSlugRoute
 }
@@ -52,6 +59,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/login': typeof LoginRoute
+  '/zai': typeof ZaiRoute
   '/invite/$token': typeof InviteTokenRoute
   '/t/$slug': typeof TSlugRoute
 }
@@ -60,21 +68,30 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/login': typeof LoginRoute
+  '/zai': typeof ZaiRoute
   '/invite/$token': typeof InviteTokenRoute
   '/t/$slug': typeof TSlugRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/admin' | '/login' | '/invite/$token' | '/t/$slug'
+  fullPaths: '/' | '/admin' | '/login' | '/zai' | '/invite/$token' | '/t/$slug'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/admin' | '/login' | '/invite/$token' | '/t/$slug'
-  id: '__root__' | '/' | '/admin' | '/login' | '/invite/$token' | '/t/$slug'
+  to: '/' | '/admin' | '/login' | '/zai' | '/invite/$token' | '/t/$slug'
+  id:
+    | '__root__'
+    | '/'
+    | '/admin'
+    | '/login'
+    | '/zai'
+    | '/invite/$token'
+    | '/t/$slug'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
   LoginRoute: typeof LoginRoute
+  ZaiRoute: typeof ZaiRoute
   InviteTokenRoute: typeof InviteTokenRoute
   TSlugRoute: typeof TSlugRoute
 }
@@ -102,6 +119,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/zai': {
+      id: '/zai'
+      path: '/zai'
+      fullPath: '/zai'
+      preLoaderRoute: typeof ZaiRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/invite/$token': {
       id: '/invite/$token'
       path: '/invite/$token'
@@ -123,6 +147,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
   LoginRoute: LoginRoute,
+  ZaiRoute: ZaiRoute,
   InviteTokenRoute: InviteTokenRoute,
   TSlugRoute: TSlugRoute,
 }

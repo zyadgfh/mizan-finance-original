@@ -1,0 +1,43 @@
+{
+  "scope": [
+    "project"
+  ],
+  "mode": "read-only",
+  "generatedAt": "2026-11-19T14:57:03.971Z",
+  "tool": "cfsa",
+  "skillVersion": "1.0.0",
+  "skillSource": "local-original",
+  "summary": "1 نتيجة (1 حرجة/عالية)، 10 ضابط سليم، 0 قيد بيانات.",
+  "findings": [
+    {
+      "id": "HDR-CSP",
+      "severity": "high",
+      "asset": "vercel.json",
+      "evidence": "لا توجد Content-Security-Policy على مستوى الحافة",
+      "impact": "عدم وجود CSP يزيد من أثر أي XSS محتمل",
+      "remediation": "أضف CSP صارمة (default-src 'self'؛ بدون unsafe-inline/eval) على مستوى Edge أو في middleware الخادم",
+      "confidence": "medium"
+    }
+  ],
+  "passing": [
+    "الترويسة Strict-Transport-Security مفعّلة في vercel.json",
+    "الترويسة X-Content-Type-Options مفعّلة في vercel.json",
+    "الترويسة Referrer-Policy مفعّلة في vercel.json",
+    "الترويسة Permissions-Policy مفعّلة في vercel.json",
+    "قائمة CORS allowlist محددة صراحة في الخادم (لا يوجد '*')",
+    "Helmet مفعّل لترويسات الأمان في الخادم",
+    "لم يُعثر على أنماط أسرار واضحة في شجرة المستودع (فحص heuristic)",
+    "npm audit: لا توجد ثغرات معروفة في التبعيات (omit=dev)",
+    "يوجد تحقق صريح من ملكية المحادثة (IDOR) في chats.controller.ts",
+    "يوجد rate limiting عام مطبّق بالمفتاح (مستخدم/IP) عبر common/rate-limit.ts، إضافة لحد أشد على مسار الإرسال عبر messages.controller.ts"
+  ],
+  "limitations": [],
+  "fixPlan": [
+    {
+      "priority": 1,
+      "id": "HDR-CSP",
+      "action": "أضف CSP صارمة (default-src 'self'؛ بدون unsafe-inline/eval) على مستوى Edge أو في middleware الخادم"
+    }
+  ],
+  "readOnlyConfirmed": true
+}

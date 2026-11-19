@@ -1,0 +1,13 @@
+{
+  "name": "@z-ai/markdown",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Safe Markdown -> sanitized HTML pipeline (marked + isomorphic-dompurify). Mirrors src/zai/lib/markdown.ts.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "marked": "^16.0.0",
+    "isomorphic-dompurify": "^2.19.0"
+  }
+}
