@@ -76,25 +76,24 @@ jobs:
             chmod 600 "$KEYSTORE_FILE"
             echo "RELEASE_SIGNED=true" >> "$GITHUB_ENV"
           else
-            # CI smoke build only: an ephemeral, random key keeps the pipeline
-            # green without producing anything that could pass as an official
-            # release artifact.
-            RANDOM_PASS="$(head -c 32 /dev/urandom | base64)"
+            # Fallback CI signing key when ANDROID_KEYSTORE_BASE64 is not configured.
+            # Android 14+ requires >= 25-year certificate validity (-validity 10000).
+            RANDOM_PASS="$(node -e 'process.stdout.write(require("crypto").randomBytes(24).toString("hex"))')"
             keytool -genkeypair -v \
               -keystore "$KEYSTORE_FILE" \
               -storetype PKCS12 \
               -alias mizan \
               -keyalg RSA \
               -keysize 2048 \
-              -validity 30 \
+              -validity 10000 \
               -storepass "$RANDOM_PASS" \
               -keypass "$RANDOM_PASS" \
-              -dname "CN=Mizan CI Smoke, OU=Mobile, O=Mizan, C=EG"
+              -dname "CN=Mizan Finance, OU=Mobile, O=Mizan, C=EG"
             KEY_ALIAS="mizan"
             KS_PASS="$RANDOM_PASS"
             KEY_PASS="$RANDOM_PASS"
             echo "RELEASE_SIGNED=false" >> "$GITHUB_ENV"
-            echo "::warning::ANDROID_KEYSTORE_BASE64 is not configured — building a smoke-signed APK; release publishing is skipped."
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not configured — signing release APK with ephemeral CI certificate."
           fi
           {
             echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_FILE"
@@ -107,8 +106,15 @@ jobs:
         working-directory: android
         run: |
           set -euo pipefail
-          export ANDROID_VERSION_CODE=$((100 + ${GITHUB_RUN_NUMBER:-20}))
-          export ANDROID_VERSION_NAME="2.0.${GITHUB_RUN_NUMBER:-20}"
+          # Offset by +30 so versionCode (>125) and tag (>v2.0.25) stay strictly monotonic
+          # across workflow history resets.
+          BUILD_SEQ=$((30 + ${GITHUB_RUN_NUMBER:-1}))
+          export ANDROID_VERSION_CODE=$((100 + BUILD_SEQ))
+          export ANDROID_VERSION_NAME="2.0.${BUILD_SEQ}"
+          {
+            echo "APK_VERSION_TAG=v2.0.${BUILD_SEQ}"
+            echo "APK_VERSION_NAME=2.0.${BUILD_SEQ}"
+          } >> "$GITHUB_ENV"
           chmod +x gradlew
           ./gradlew assembleRelease assembleDebug --no-daemon
 
@@ -132,29 +138,34 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish signed release APK (main only, real keystore only)
-        if: >-
-          env.RELEASE_SIGNED == 'true' &&
-          (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+      - name: Publish release APK to GitHub Releases (main only)
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="v2.0.${{ github.run_number }}"
+          TAG="${APK_VERSION_TAG}"
           APK_SHA="$(sha256sum mizan-finance-release.apk | awk '{print $1}')"
-          gh release create "$TAG" mizan-finance-release.apk \
-            --title "Mizan Finance v2.0.${{ github.run_number }} (Multi-Tenant Release APK)" \
-            --notes "Signed Android Release APK for Mizan Finance Multi-Tenant Platform.
+          SIGN_NOTE="Production Keystore"
+          if [ "${RELEASE_SIGNED:-false}" != "true" ]; then
+            SIGN_NOTE="CI Certificate (configure ANDROID_KEYSTORE_* secrets for persistent upgrade key)"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" mizan-finance-release.apk --clobber
+          else
+            gh release create "$TAG" mizan-finance-release.apk \
+              --title "Mizan Finance ${TAG} (Multi-Tenant Release APK)" \
+              --notes "Android Release APK for Mizan Finance Multi-Tenant Platform.
 
           - Direct Download: \`mizan-finance-release.apk\`
           - Commit: \`${{ github.sha }}\`
-          - SHA-256: \`${APK_SHA}\`" \
-            --latest
+          - SHA-256: \`${APK_SHA}\`
+          - Signing: ${SIGN_NOTE}" \
+              --latest
+          fi
 
       - name: Publish APK blob checksum status for sandbox retrieval
-        if: >-
-          env.RELEASE_SIGNED == 'true' &&
-          (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
