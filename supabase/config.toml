@@ -5,5 +5,17 @@
 # Do not re-enable verify_jwt without moving those two actions to a separate
 # function.
 
+[auth]
+site_url = "https://mizan-finance-rho.vercel.app"
+additional_redirect_urls = [
+  "https://mizan-finance-rho.vercel.app/**",
+  "https://mizan-*-zyadgams-projects.vercel.app/**",
+  "com.mizan.finance://**",
+  "capacitor://localhost/**",
+  "http://localhost:8080/**",
+  "http://localhost:5173/**",
+  "http://127.0.0.1:8080/**"
+]
+
 [functions.admin-users]
 verify_jwt = false

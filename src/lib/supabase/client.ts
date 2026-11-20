@@ -23,6 +23,8 @@ export const SUPABASE_ANON_KEY = readPublicEnv("VITE_SUPABASE_ANON_KEY") ?? DEFA
 
 let cachedClient: SupabaseClient | null = null;
 
+export const SUPABASE_AUTH_STORAGE_KEY = "mizan.supabase.auth.v1";
+
 export function getSupabaseClient(): SupabaseClient {
   if (cachedClient) return cachedClient;
   const hasStorage = typeof window !== "undefined" && typeof window.localStorage !== "undefined";
@@ -30,10 +32,11 @@ export function getSupabaseClient(): SupabaseClient {
     typeof navigator !== "undefined" && /HappyDOM|jsdom/i.test(navigator.userAgent ?? "");
   cachedClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     auth: {
+      flowType: "pkce",
       persistSession: hasStorage && !isNodeDomTest,
       autoRefreshToken: hasStorage && !isNodeDomTest,
       detectSessionInUrl: typeof window !== "undefined" && !isNodeDomTest,
-      storageKey: "mizan.supabase.auth.v1",
+      storageKey: SUPABASE_AUTH_STORAGE_KEY,
       storage: hasStorage ? window.localStorage : undefined,
     },
   });

@@ -11,7 +11,12 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { defaultExchangeRatesFor, defaultWallets } from "../finance/logic.ts";
-import { configureReceiptSyncScope, flushPendingReceiptSync } from "../finance/receipts.ts";
+import {
+  configureReceiptSyncScope,
+  flushPendingReceiptSync,
+  purgeAllReceiptsOnSignOut,
+  purgeTenantReceiptsCache,
+} from "../finance/receipts.ts";
 import { seedData } from "../finance/seed.ts";
 import {
   applySyncedTenantData,
@@ -25,9 +30,15 @@ import type { Currency, Data } from "../finance/types.ts";
 import { safeRandomUUID } from "../mobile-safe.ts";
 import { getSupabaseClient } from "../supabase/client.ts";
 import {
+  hasLocalPkceVerifier,
+  hasMeaningfulLegacyLedgerData,
+  parseSafeDeepLinkAction,
+} from "./security-guards.ts";
+import {
   activateTenantPlan,
   createCloudWorkspace,
   fetchMyWorkspaceBundle,
+  previewTenantInvite,
   queueOutboxOperations,
   redeemTenantInvite,
   signOutSupabase,
@@ -59,11 +70,26 @@ import {
   type SyncRejectedItem,
   type SyncStatus,
   type TenantKind,
+  type TenantRole,
   type TenantSummary,
   type TenantUser,
 } from "./types.ts";
 
 export const PENDING_INVITE_KEY = "mizan.pendingInvite.v1";
+
+export type PendingInvitePrompt = {
+  code: string;
+  workspaceName?: string;
+  role?: TenantRole;
+};
+
+export type PendingLegacyMigration = {
+  targetWorkspaceId: string;
+  targetWorkspaceName: string;
+  targetAccountEmail: string;
+};
+
+export { hasLocalPkceVerifier, hasMeaningfulLegacyLedgerData, parseSafeDeepLinkAction };
 
 export type InitialTestSession = {
   user: TenantUser;
@@ -89,9 +115,15 @@ export type TenantContextValue = {
   lastSyncedAt: number | null;
   migratedLegacyNotice: boolean;
   passwordRecoveryPending: boolean;
+  pendingInvitePrompt: PendingInvitePrompt | null;
+  pendingLegacyMigration: PendingLegacyMigration | null;
   clearPasswordRecovery: () => void;
   dismissMigratedNotice: () => void;
   dismissRejectedSync: () => void;
+  confirmPendingInvite: () => Promise<void>;
+  dismissPendingInvite: () => void;
+  confirmLegacyMigration: () => void;
+  dismissLegacyMigration: () => void;
   switchTenant: (tenantId: string) => void;
   switchTenantBySlug: (slug: string) => boolean;
   refreshWorkspaces: () => Promise<void>;
@@ -178,6 +210,8 @@ export function TenantProvider({
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [migratedLegacyNotice, setMigratedLegacyNotice] = useState(false);
   const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(false);
+  const [pendingInvitePrompt, setPendingInvitePrompt] = useState<PendingInvitePrompt | null>(null);
+  const [pendingLegacyMigration, setPendingLegacyMigration] = useState<PendingLegacyMigration | null>(null);
 
   const syncTimerRef = useRef<number | null>(null);
   const syncingRef = useRef(false);
@@ -339,22 +373,31 @@ export function TenantProvider({
         const bundle = await fetchMyWorkspaceBundle(authUser);
         let cloudList = [...bundle.workspaces];
 
-        // Auto-redeem any invite code queued before login
+        // Surface any queued invite code as an explicit confirmation prompt (never auto-redeem on GET)
         const pendingInvite =
           typeof sessionStorage !== "undefined" ? sessionStorage.getItem(PENDING_INVITE_KEY) : null;
         if (pendingInvite) {
+          const normalizedCode = pendingInvite.trim().toUpperCase();
           try {
-            await redeemTenantInvite(pendingInvite);
-            sessionStorage.removeItem(PENDING_INVITE_KEY);
-            const refreshed = await fetchMyWorkspaceBundle(authUser);
-            cloudList = [...refreshed.workspaces];
+            const preview = await previewTenantInvite(normalizedCode);
+            if (!cloudList.some((w) => w.id === preview.tenantId)) {
+              setPendingInvitePrompt({
+                code: normalizedCode,
+                workspaceName: preview.name,
+                role: preview.role,
+              });
+            } else {
+              sessionStorage.removeItem(PENDING_INVITE_KEY);
+              setPendingInvitePrompt(null);
+            }
           } catch (err) {
             sessionStorage.removeItem(PENDING_INVITE_KEY);
-            toast.error(err instanceof Error ? err.message : "تعذّر قبول الدعوة");
+            setPendingInvitePrompt(null);
+            toast.error(err instanceof Error ? err.message : "رمز الدعوة غير صالح أو منتهي الصلاحية");
           }
         }
 
-        // First cloud workspace provisioning + automatic legacy mizan.v1 migration
+        // First cloud workspace provisioning + explicit consent gate for legacy mizan.v1 migration
         const legacyRaw = typeof localStorage !== "undefined" ? loadLegacyMizanV1Raw(localStorage) : null;
         const legacyParsed = legacyRaw ? asData(legacyRaw) : null;
 
@@ -368,13 +411,17 @@ export function TenantProvider({
           cloudList = [defaultWs];
         }
 
-        if (legacyParsed && cloudList.length > 0 && typeof localStorage !== "undefined") {
-          const targetWs = cloudList.find((w) => w.role === "owner") ?? cloudList[0];
-          const ops = snapshotToOutboxOps(legacyParsed, Date.now());
-          localStorage.setItem(`mizan.tenant.${targetWs.id}.v1`, JSON.stringify(pickFinanceData(legacyParsed)));
-          queueOutboxOperations(targetWs.id, ops, localStorage);
-          markLegacyMizanV1Migrated(targetWs.id, localStorage);
-          setMigratedLegacyNotice(true);
+        if (legacyParsed && typeof localStorage !== "undefined") {
+          const ownedWs = cloudList.find((w) => w.role === "owner") ?? null;
+          if (!hasMeaningfulLegacyLedgerData(legacyParsed)) {
+            markLegacyMizanV1Migrated(ownedWs?.id ?? "empty", localStorage);
+          } else if (ownedWs) {
+            setPendingLegacyMigration({
+              targetWorkspaceId: ownedWs.id,
+              targetWorkspaceName: ownedWs.name,
+              targetAccountEmail: bundle.user.email,
+            });
+          }
         } else if (legacyRaw && typeof localStorage !== "undefined") {
           markLegacyMizanV1Migrated(cloudList[0]?.id ?? "migrated", localStorage);
         }
@@ -466,6 +513,9 @@ export function TenantProvider({
         configureReceiptSyncScope({ tenantId: null, mode: "local", canWrite: true });
         clearFinanceTenantScope();
         wipeAllTenantCachesOnSignOut();
+        void purgeAllReceiptsOnSignOut();
+        setPendingInvitePrompt(null);
+        setPendingLegacyMigration(null);
         setUser(null);
         setIsSuperAdmin(false);
         setWorkspaces([]);
@@ -482,38 +532,47 @@ export function TenantProvider({
     const handleDeepLinkUrl = async (rawUrl: string) => {
       if (!rawUrl) return;
       try {
-        const parsed = new URL(rawUrl);
-        const hashParams = new URLSearchParams(parsed.hash.replace(/^#/, ""));
-        const accessToken = hashParams.get("access_token") ?? parsed.searchParams.get("access_token");
-        const refreshToken = hashParams.get("refresh_token") ?? parsed.searchParams.get("refresh_token");
-        const linkType = hashParams.get("type") ?? parsed.searchParams.get("type");
+        const action = parseSafeDeepLinkAction(rawUrl);
 
-        if (accessToken && refreshToken) {
-          await sb.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
-          if (linkType === "recovery") {
+        if (action.rejectedImplicitTokens) {
+          toast.error("تم رفض رابط مصادقة غير مربوط بجلسة الجهاز الحالية لحماية بياناتك");
+          return;
+        }
+
+        if (action.pkceCode) {
+          const { data: current } = await sb.auth.getSession();
+          if (current.session?.user) {
+            toast.error("سجّل الخروج أولاً قبل فتح رابط مصادقة جديد");
+            return;
+          }
+          if (!hasLocalPkceVerifier()) {
+            toast.error("انتهت صلاحية جلسة التحقق على هذا الجهاز، اطلب رابطاً جديداً من التطبيق");
+            return;
+          }
+          const { error: exchangeErr } = await sb.auth.exchangeCodeForSession(action.pkceCode);
+          if (!exchangeErr && action.linkType === "recovery") {
             setPasswordRecoveryPending(true);
           }
         }
 
-        const fullPath = parsed.host ? `/${parsed.host}${parsed.pathname}` : parsed.pathname;
-        const inviteMatch = fullPath.match(/\/invite\/([A-Za-z0-9-]+)/);
-        const inviteCode = parsed.searchParams.get("invite")?.trim() || inviteMatch?.[1];
-        if (inviteCode) {
-          const normalized = inviteCode.toUpperCase();
+        if (action.inviteCode) {
           if (typeof sessionStorage !== "undefined") {
-            sessionStorage.setItem(PENDING_INVITE_KEY, normalized);
+            sessionStorage.setItem(PENDING_INVITE_KEY, action.inviteCode);
           }
           const { data: s } = await sb.auth.getSession();
           if (s.session?.user) {
             try {
-              const redeemed = await redeemTenantInvite(normalized);
-              sessionStorage.removeItem(PENDING_INVITE_KEY);
-              await hydrateAuthenticatedUser(userFromAuth(s.session.user));
-              setActiveTenantId(redeemed.tenantId);
-              saveActiveTenantId(redeemed.tenantId);
-              toast.success(`تم الانضمام إلى ${redeemed.name}`);
+              const preview = await previewTenantInvite(action.inviteCode);
+              setPendingInvitePrompt({
+                code: action.inviteCode,
+                workspaceName: preview.name,
+                role: preview.role,
+              });
             } catch (err) {
-              toast.error(err instanceof Error ? err.message : "تعذّر قبول الدعوة");
+              if (typeof sessionStorage !== "undefined") {
+                sessionStorage.removeItem(PENDING_INVITE_KEY);
+              }
+              toast.error(err instanceof Error ? err.message : "رمز الدعوة غير صالح");
             }
           }
         }
@@ -554,6 +613,7 @@ export function TenantProvider({
     for (const oldId of prevIds) {
       if (!nextCloudIds.has(oldId)) {
         wipeTenantCache(oldId);
+        void purgeTenantReceiptsCache(oldId);
       }
     }
   }, [user, initialSession, workspaces, hydrateAuthenticatedUser]);
@@ -654,6 +714,7 @@ export function TenantProvider({
       const remainingLocal = loadLocalWorkspaces(user.id).filter((w) => w.id !== localTenantId);
       saveLocalWorkspaces(user.id, remainingLocal);
       wipeTenantCache(localTenantId);
+      void purgeTenantReceiptsCache(localTenantId);
       setWorkspaces((prev) => [cloudWs, ...prev.filter((w) => w.id !== localTenantId)]);
       setActiveTenantId(cloudWs.id);
       return cloudWs;
@@ -722,6 +783,10 @@ export function TenantProvider({
         }
         return null;
       }
+      if (typeof sessionStorage !== "undefined") {
+        sessionStorage.removeItem(PENDING_INVITE_KEY);
+      }
+      setPendingInvitePrompt(null);
       const res = await redeemTenantInvite(code);
       await hydrateAuthenticatedUser(user);
       setActiveTenantId(res.tenantId);
@@ -747,6 +812,52 @@ export function TenantProvider({
     [user, workspaces, hydrateAuthenticatedUser],
   );
 
+  const dismissPendingInvite = useCallback(() => {
+    if (typeof sessionStorage !== "undefined") {
+      sessionStorage.removeItem(PENDING_INVITE_KEY);
+    }
+    setPendingInvitePrompt(null);
+  }, []);
+
+  const confirmPendingInvite = useCallback(async () => {
+    if (!pendingInvitePrompt) return;
+    const code = pendingInvitePrompt.code;
+    const joined = await acceptInviteCode(code);
+    if (joined) {
+      toast.success(`تم الانضمام إلى ${joined.name}`);
+    }
+  }, [pendingInvitePrompt, acceptInviteCode]);
+
+  const confirmLegacyMigration = useCallback(() => {
+    if (!pendingLegacyMigration || typeof localStorage === "undefined") {
+      setPendingLegacyMigration(null);
+      return;
+    }
+    const legacyRaw = loadLegacyMizanV1Raw(localStorage);
+    const legacyParsed = legacyRaw ? asData(legacyRaw) : null;
+    if (legacyParsed) {
+      const targetId = pendingLegacyMigration.targetWorkspaceId;
+      const ops = snapshotToOutboxOps(legacyParsed, Date.now());
+      localStorage.setItem(`mizan.tenant.${targetId}.v1`, JSON.stringify(pickFinanceData(legacyParsed)));
+      queueOutboxOperations(targetId, ops, localStorage);
+      markLegacyMizanV1Migrated(targetId, localStorage);
+      setMigratedLegacyNotice(true);
+      const targetWs = workspaces.find((w) => w.id === targetId) ?? null;
+      if (targetWs && activeTenant?.id === targetId) {
+        applySyncedTenantData(targetId, pickFinanceData(legacyParsed));
+        void syncSpecificTenant(targetWs);
+      }
+    }
+    setPendingLegacyMigration(null);
+  }, [pendingLegacyMigration, workspaces, activeTenant, syncSpecificTenant]);
+
+  const dismissLegacyMigration = useCallback(() => {
+    if (pendingLegacyMigration && typeof localStorage !== "undefined") {
+      markLegacyMizanV1Migrated(pendingLegacyMigration.targetWorkspaceId, localStorage);
+    }
+    setPendingLegacyMigration(null);
+  }, [pendingLegacyMigration]);
+
   const syncNow = useCallback(async () => {
     await syncSpecificTenant(activeTenant);
   }, [activeTenant, syncSpecificTenant]);
@@ -755,6 +866,9 @@ export function TenantProvider({
     configureReceiptSyncScope({ tenantId: null, mode: "local", canWrite: true });
     clearFinanceTenantScope();
     wipeAllTenantCachesOnSignOut();
+    void purgeAllReceiptsOnSignOut();
+    setPendingInvitePrompt(null);
+    setPendingLegacyMigration(null);
     if (!initialSession) {
       await signOutSupabase();
     }
@@ -782,9 +896,15 @@ export function TenantProvider({
       lastSyncedAt,
       migratedLegacyNotice,
       passwordRecoveryPending,
+      pendingInvitePrompt,
+      pendingLegacyMigration,
       clearPasswordRecovery: () => setPasswordRecoveryPending(false),
       dismissMigratedNotice: () => setMigratedLegacyNotice(false),
       dismissRejectedSync: () => setRejectedSyncItems([]),
+      confirmPendingInvite,
+      dismissPendingInvite,
+      confirmLegacyMigration,
+      dismissLegacyMigration,
       switchTenant,
       switchTenantBySlug,
       refreshWorkspaces,
@@ -812,6 +932,12 @@ export function TenantProvider({
       lastSyncedAt,
       migratedLegacyNotice,
       passwordRecoveryPending,
+      pendingInvitePrompt,
+      pendingLegacyMigration,
+      confirmPendingInvite,
+      dismissPendingInvite,
+      confirmLegacyMigration,
+      dismissLegacyMigration,
       switchTenant,
       switchTenantBySlug,
       refreshWorkspaces,

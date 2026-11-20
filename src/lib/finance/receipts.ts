@@ -243,6 +243,60 @@ export async function flushPendingReceiptSync(tenantId: string): Promise<void> {
   }
 }
 
+export async function purgeTenantReceiptsCache(tenantId: string): Promise<void> {
+  if (!tenantId) return;
+  writeQueue(uploadQueueKey(tenantId), []);
+  writeQueue(deleteQueueKey(tenantId), []);
+  if (!hasIndexedDb()) return;
+  try {
+    const db = await openDb();
+    const prefix = `${tenantId}/`;
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      const store = tx.objectStore(STORE);
+      const keysReq = store.getAllKeys();
+      keysReq.onsuccess = () => {
+        for (const k of keysReq.result ?? []) {
+          if (String(k).startsWith(prefix)) store.delete(k);
+        }
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch {
+    /* ignore IndexedDB errors in restricted contexts */
+  }
+}
+
+export async function purgeAllReceiptsOnSignOut(): Promise<void> {
+  if (!hasIndexedDb()) return;
+  try {
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch {
+    /* fall through to deleteDatabase attempt */
+  }
+  try {
+    if (typeof indexedDB.deleteDatabase === "function") {
+      await new Promise<void>((resolve) => {
+        const req = indexedDB.deleteDatabase(DB);
+        req.onsuccess = () => resolve();
+        req.onerror = () => resolve();
+        req.onblocked = () => resolve();
+      });
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 export async function clearReceipts() {
   if (!hasIndexedDb()) return;
   const { tenantId } = activeScope;

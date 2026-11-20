@@ -28,15 +28,17 @@ function allowedOrigins(): string[] {
 function isAllowedOrigin(origin: string | null): boolean {
   if (!origin) return false;
   if (allowedOrigins().includes(origin)) return true;
-  // Native shells and sandbox previews serve the app from https origins.
+  // Native shells and owner-scoped preview deployments serve the app from https origins.
   try {
     const url = new URL(origin);
     if (url.protocol !== "https:") return false;
-    return (
-      url.hostname.endsWith(".e2b.app") ||
-      url.hostname.endsWith(".vercel.app") ||
-      url.hostname === "localhost"
-    );
+    const host = url.hostname.toLowerCase();
+    if (host === "localhost") return true;
+    if (host.startsWith("mizan-") && host.endsWith("-zyadgams-projects.vercel.app")) {
+      return true;
+    }
+    if (Deno.env.get("MIZAN_DISABLE_PREVIEW_ORIGINS") === "1") return false;
+    return host.endsWith(".e2b.app");
   } catch {
     return false;
   }
@@ -526,6 +528,7 @@ Deno.serve(async (req: Request) => {
 
     if (identity.kind === "phone" && !isDeliverableEmail(contactEmail)) {
       return jsonResponse(
+        req,
         { error: "أدخل بريداً إلكترونياً صحيحاً لتأكيد الحساب (رقم الهاتف وحده لا يكفي)" },
         400,
       );
@@ -739,6 +742,7 @@ Deno.serve(async (req: Request) => {
     } catch (err) {
       await cleanupPartialRegistration("register_subscriber");
       return jsonResponse(
+        req,
         { error: err instanceof Error ? err.message : "حدث خطأ أثناء إرسال طلب الاشتراك، حاول مرة أخرى" },
         500,
       );
@@ -998,6 +1002,7 @@ Deno.serve(async (req: Request) => {
     }
     if (!isDeliverableEmail(identity.authEmail)) {
       return jsonResponse(
+        req,
         { error: "يتطلب إنشاء الحساب بريداً إلكترونياً حقيقياً لتأكيد الهوية" },
         400,
       );

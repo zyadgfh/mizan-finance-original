@@ -161,7 +161,7 @@ test("workspace creation is trial-aware, verified-email-only and quota-limited",
     await actAsSystem();
   }
 
-  // And a plan with trial_days = 0 must really produce a pending workspace.
+  // Paid plans ship with trial_days = 0 so unapproved signups cannot self-provision trials.
   await exec(`update subscription_plans set trial_days = 0 where code = 'yearly'`);
   await actAs(OWNER);
   try {
@@ -171,7 +171,6 @@ test("workspace creation is trial-aware, verified-email-only and quota-limited",
     assert.equal(noTrial.subscription_status, "pending_approval", "trial_days = 0 must not grant a trial");
   } finally {
     await actAsSystem();
-    await exec(`update subscription_plans set trial_days = 14 where code = 'yearly'`);
   }
 
   await exec(`update auth.users set email_confirmed_at = null where id = $1`, [MEMBER]);
@@ -426,6 +425,114 @@ test("anon may call the claim-free boolean helpers but no system job", async () 
     await rejects(() => exec(`select enforce_expired_subscriptions()`), /permission denied/);
     await rejects(() => exec(`select check_rate_limit('anon', 'x', 1, 60)`), /permission denied/);
     assert.equal((await one(`select has_platform_owner() as ok`)).ok, true, "public bootstrap check stays available");
+  } finally {
+    await actAsSystem();
+  }
+});
+
+test("cloudflare audit regressions: RPC-only tenant_records, owner-only soft-delete, self-only profiles, and invite preview", async () => {
+  const DELEGATED_ADMIN = "44444444-4444-4444-4444-444444444444";
+  const NON_SUPER_OWNER = "55555555-5555-5555-5555-555555555555";
+  await exec(
+    `insert into auth.users (id, email, email_confirmed_at, raw_user_meta_data) values
+       ($1, 'admin-del@example.com', now(), '{"display_name":"Delegated Admin","phone":"+201011112222"}'::jsonb),
+       ($2, 'biz-owner@example.com', now(), '{"display_name":"Biz Owner","phone":"+201033334444"}'::jsonb)`,
+    [DELEGATED_ADMIN, NON_SUPER_OWNER],
+  );
+
+  // 1. Paid plans default to trial_days = 0 -> new subscriber workspace stays pending_approval and non-writable
+  await actAs(NON_SUPER_OWNER);
+  let bizWs;
+  try {
+    bizWs = await one(
+      `select * from create_tenant_workspace('Biz Ledger', 'biz-ledger', 'business', 'EGP', 'yearly')`,
+    );
+    assert.equal(bizWs.subscription_status, "pending_approval");
+    assert.equal((await one(`select can_write_tenant($1) as ok`, [bizWs.id])).ok, false);
+  } finally {
+    await actAsSystem();
+  }
+
+  // Activate workspace and add MEMBER ('member') + DELEGATED_ADMIN ('admin')
+  await exec(
+    `update tenants set subscription_status = 'active', current_period_end = now() + interval '30 days' where id = $1`,
+    [bizWs.id],
+  );
+  await exec(
+    `insert into tenant_members (tenant_id, user_id, role, display_name, email) values
+       ($1, $2, 'member', 'Member', 'member@example.com'),
+       ($1, $3, 'admin', 'Delegated Admin', 'admin-del@example.com')`,
+    [bizWs.id, MEMBER, DELEGATED_ADMIN],
+  );
+
+  // 2. Direct PostgREST INSERT/UPDATE on tenant_records is denied; sync_push_tenant_records works
+  await actAs(NON_SUPER_OWNER);
+  try {
+    const pushed = await one(`select sync_push_tenant_records($1, $2::jsonb) as r`, [
+      bizWs.id,
+      JSON.stringify([{ entityType: "debt", entityId: "d-1", payload: { id: "d-1", principal: 5000 }, updatedAtMs: Date.now() }]),
+    ]);
+    assert.equal(pushed.r.applied.length, 1);
+  } finally {
+    await actAsSystem();
+  }
+
+  await actAs(MEMBER);
+  try {
+    await rejects(
+      () =>
+        exec(
+          `update tenant_records set updated_at_ms = 9007199254740991, created_by = $2 where tenant_id = $1 and entity_id = 'd-1'`,
+          [bizWs.id, NON_SUPER_OWNER],
+        ),
+      /permission denied/,
+    );
+    await rejects(
+      () =>
+        exec(
+          `insert into tenant_records (tenant_id, entity_type, entity_id, payload, updated_at_ms) values ($1, 'tx', 'forged', '{}'::jsonb, 1)`,
+          [bizWs.id],
+        ),
+      /permission denied/,
+    );
+  } finally {
+    await actAsSystem();
+  }
+
+  // 3. Delegated non-owner admin cannot soft-delete workspace via tenants.deleted_at
+  await actAs(DELEGATED_ADMIN);
+  try {
+    await rejects(
+      () => exec(`update tenants set deleted_at = now() where id = $1`, [bizWs.id]),
+      /Only the workspace owner/,
+    );
+  } finally {
+    await actAsSystem();
+  }
+
+  // 4. Co-members cannot scrape private phone/contact_display from public.profiles
+  await actAs(DELEGATED_ADMIN);
+  try {
+    const others = await exec(`select id, phone from profiles where id = $1`, [NON_SUPER_OWNER]);
+    assert.equal(others.rows.length, 0, "co-member must not read another user's profiles row");
+    const selfRow = await one(`select id, phone from profiles where id = $1`, [DELEGATED_ADMIN]);
+    assert.equal(selfRow.phone, "+201011112222");
+  } finally {
+    await actAsSystem();
+  }
+
+  // 5. preview_tenant_invite returns workspace metadata without adding caller to tenant_members
+  await exec(
+    `insert into tenant_invites (tenant_id, invite_code, email, role, created_by, max_uses)
+     values ($1, 'MZN-PREV-2026', null, 'viewer', $2, 5)`,
+    [bizWs.id, NON_SUPER_OWNER],
+  );
+  await actAs(OUTSIDER);
+  try {
+    const preview = await one(`select preview_tenant_invite('MZN-PREV-2026') as p`);
+    assert.equal(preview.p.name, "Biz Ledger");
+    assert.equal(preview.p.role, "viewer");
+    assert.equal((await one(`select is_tenant_member($1) as m`, [bizWs.id])).m, false);
   } finally {
     await actAsSystem();
   }
