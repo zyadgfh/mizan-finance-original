@@ -149,15 +149,46 @@ export async function signInWithEmailPassword(identifier: string, password: stri
   return userFromAuth(data.user);
 }
 
+const CANONICAL_APP_REDIRECT = "https://mizan-finance-rho.vercel.app/";
+
+export function sanitizeAuthRedirectUrl(redirectTo?: string): string {
+  const candidate =
+    redirectTo?.trim() ||
+    (typeof window !== "undefined" ? `${window.location.origin}/` : CANONICAL_APP_REDIRECT);
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === "com.mizan.finance:") {
+      return "com.mizan.finance://auth";
+    }
+    if (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")
+    ) {
+      return `${parsed.origin}/`;
+    }
+    if (parsed.protocol !== "https:") {
+      return CANONICAL_APP_REDIRECT;
+    }
+    const host = parsed.hostname.toLowerCase();
+    const isTrustedProdOrPreview =
+      host === "mizan-finance-rho.vercel.app" ||
+      (host.startsWith("mizan-") && host.endsWith("-zyadgams-projects.vercel.app")) ||
+      (typeof window !== "undefined" &&
+        parsed.origin === window.location.origin &&
+        host.endsWith(".e2b.app"));
+    return isTrustedProdOrPreview ? `${parsed.origin}/` : CANONICAL_APP_REDIRECT;
+  } catch {
+    return CANONICAL_APP_REDIRECT;
+  }
+}
+
 export async function requestPasswordResetEmail(email: string, redirectTo?: string): Promise<void> {
   const normalized = normalizeSubscriberIdentity(email);
   if (!normalized || normalized.kind !== "email") {
     throw new Error("استعادة كلمة المرور عبر الرابط تتطلب بريداً إلكترونياً مسجلاً؛ لحسابات الهاتف تواصل مع إدارة المنصة");
   }
   const sb = getSupabaseClient();
-  const target =
-    redirectTo ||
-    (typeof window !== "undefined" ? `${window.location.origin}/` : "https://mizan-finance-rho.vercel.app/");
+  const target = sanitizeAuthRedirectUrl(redirectTo);
   const { error } = await sb.auth.resetPasswordForEmail(normalized.authEmail, { redirectTo: target });
   if (error) throw new Error(error.message);
 }
@@ -317,9 +348,7 @@ export async function resendSignupVerification(identifier: string, redirectTo?: 
     throw new Error("تأكيد الحساب يتم عبر البريد الإلكتروني المسجل عند التسجيل");
   }
   const sb = getSupabaseClient();
-  const target =
-    redirectTo ||
-    (typeof window !== "undefined" ? `${window.location.origin}/` : "https://mizan-finance-rho.vercel.app/");
+  const target = sanitizeAuthRedirectUrl(redirectTo);
   const { error } = await sb.auth.resend({
     type: "signup",
     email: normalized.authEmail,
@@ -625,6 +654,24 @@ export async function revokeTenantInvite(inviteId: string): Promise<void> {
     .update({ revoked_at: new Date().toISOString() })
     .eq("id", inviteId);
   if (error) throw new Error(error.message);
+}
+
+export async function previewTenantInvite(code: string): Promise<{
+  tenantId: string;
+  name: string;
+  kind: TenantKind;
+  role: TenantRole;
+}> {
+  const sb = getSupabaseClient();
+  const { data, error } = await sb.rpc("preview_tenant_invite", { p_code: code.trim() });
+  if (error) throw new Error(error.message);
+  const res = (data ?? {}) as Record<string, unknown>;
+  return {
+    tenantId: String(res.tenant_id ?? ""),
+    name: String(res.name ?? ""),
+    kind: ((res.kind as TenantKind) || "business"),
+    role: ((res.role as TenantRole) || "member"),
+  };
 }
 
 export async function redeemTenantInvite(code: string): Promise<{

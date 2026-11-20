@@ -409,6 +409,8 @@ export function wipeTenantCache(
     tenantOutboxKey(tenantId),
     tenantCursorKey(tenantId),
     tenantUpdatedAtKey(tenantId),
+    `mizan.receiptUploads.${tenantId}.v1`,
+    `mizan.receiptDeletes.${tenantId}.v1`,
   ]) {
     try {
       if (storage.getItem(key) !== null) {
@@ -435,8 +437,11 @@ export function wipeAllTenantCachesOnSignOut(
       k.startsWith("mizan.tenant.") ||
       k.startsWith("mizan.user.") ||
       k.startsWith("mizan.auth.") ||
+      k.startsWith("mizan.receiptUploads.") ||
+      k.startsWith("mizan.receiptDeletes.") ||
+      k.startsWith("mizan.supabase.auth.v1") ||
       k === LEGACY_MIGRATED_FLAG_KEY ||
-      k === "mizan.supabase.auth.v1" ||
+      k === "mizan.pendingInvite.v1" ||
       (MIZAN_LOCAL_STORAGE_KEYS as readonly string[]).includes(k)
     ) {
       keys.push(k);
@@ -449,5 +454,12 @@ export function wipeAllTenantCachesOnSignOut(
     } catch {
       /* ignore */
     }
+  }
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      sessionStorage.removeItem("mizan.pendingInvite.v1");
+    }
+  } catch {
+    /* ignore */
   }
 }

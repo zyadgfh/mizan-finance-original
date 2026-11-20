@@ -214,12 +214,24 @@ function TenantAuthGate({
   requestedInviteCode?: string;
   initialRoute?: Route;
 }) {
-  const { authStatus, activeTenant, subscriptionBlockReason, passwordRecoveryPending, clearPasswordRecovery } =
-    useTenant();
+  const {
+    authStatus,
+    activeTenant,
+    subscriptionBlockReason,
+    passwordRecoveryPending,
+    pendingInvitePrompt,
+    pendingLegacyMigration,
+    clearPasswordRecovery,
+    confirmPendingInvite,
+    dismissPendingInvite,
+    confirmLegacyMigration,
+    dismissLegacyMigration,
+  } = useTenant();
   const { lang, dir } = useI18n();
   const [showSplash, setShowSplash] = useState(!skipSplash);
   const [newRecoveryPass, setNewRecoveryPass] = useState("");
   const [savingRecoveryPass, setSavingRecoveryPass] = useState(false);
+  const [acceptingInvite, setAcceptingInvite] = useState(false);
 
   useIsomorphicLayoutEffect(() => {
     markBootStart();
@@ -313,6 +325,85 @@ function TenantAuthGate({
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {pendingInvitePrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-[var(--surface)] border border-[var(--sep)] p-5 space-y-3 shadow-xl">
+            <div className="font-bold text-[16px]">
+              {lang === "en" ? "Workspace Invitation" : "تأكيد الانضمام إلى مساحة عمل"}
+            </div>
+            <p className="text-[12px] text-[var(--label-3)] leading-relaxed">
+              {lang === "en"
+                ? `Do you want to join "${pendingInvitePrompt.workspaceName ?? pendingInvitePrompt.code}"${pendingInvitePrompt.role ? ` as ${formatRoleLabel(pendingInvitePrompt.role, "en")}` : ""}? Your name and verified account email will be visible to workspace members.`
+                : `هل ترغب في الانضمام إلى مساحة «${pendingInvitePrompt.workspaceName ?? pendingInvitePrompt.code}»${pendingInvitePrompt.role ? ` بدور ${formatRoleLabel(pendingInvitePrompt.role, "ar")}` : ""}؟ سيظهر اسمك وبريدك لأعضاء المساحة بعد الموافقة.`}
+            </p>
+            <div className="flex items-center gap-2">
+              <PillButton
+                type="button"
+                disabled={acceptingInvite}
+                onClick={async () => {
+                  setAcceptingInvite(true);
+                  try {
+                    await confirmPendingInvite();
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : lang === "en" ? "Failed to join" : "تعذّر قبول الدعوة");
+                  } finally {
+                    setAcceptingInvite(false);
+                  }
+                }}
+                className="flex-1 h-10 text-[13px] justify-center"
+              >
+                {acceptingInvite
+                  ? lang === "en"
+                    ? "Joining…"
+                    : "جارٍ الانضمام…"
+                  : lang === "en"
+                    ? "Accept & Join"
+                    : "قبول الدعوة والانضمام"}
+              </PillButton>
+              <button
+                type="button"
+                disabled={acceptingInvite}
+                onClick={dismissPendingInvite}
+                className="h-10 px-3 rounded-xl bg-[var(--fill)] text-[12px]"
+              >
+                {lang === "en" ? "Decline" : "رفض"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingLegacyMigration && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-[var(--surface)] border border-[var(--sep)] p-5 space-y-3 shadow-xl">
+            <div className="font-bold text-[16px]">
+              {lang === "en" ? "Import Local Ledger Data?" : "استيراد البيانات المالية المحلية؟"}
+            </div>
+            <p className="text-[12px] text-[var(--label-3)] leading-relaxed">
+              {lang === "en"
+                ? `Found local ledger records on this device. Sync them to workspace "${pendingLegacyMigration.targetWorkspaceName}" under account (${pendingLegacyMigration.targetAccountEmail})?`
+                : `توجد سجلات مالية محلية محفوظة على هذا الجهاز. هل تريد ترحيلها ومزامنتها مع مساحة «${pendingLegacyMigration.targetWorkspaceName}» التابعة للحساب (${pendingLegacyMigration.targetAccountEmail})؟`}
+            </p>
+            <div className="flex items-center gap-2">
+              <PillButton
+                type="button"
+                onClick={confirmLegacyMigration}
+                className="flex-1 h-10 text-[13px] justify-center"
+              >
+                {lang === "en" ? "Import & Sync" : "نعم، استيراد ومزامنة"}
+              </PillButton>
+              <button
+                type="button"
+                onClick={dismissLegacyMigration}
+                className="h-10 px-3 rounded-xl bg-[var(--fill)] text-[12px]"
+              >
+                {lang === "en" ? "Skip" : "تخطي"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

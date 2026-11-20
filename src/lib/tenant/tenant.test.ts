@@ -27,6 +27,13 @@ import {
   type RemoteTenantRecord,
 } from "./storage.ts";
 import { cleanDisplayContact, normalizeSubscriberIdentity } from "./identity.ts";
+import { sanitizeAuthRedirectUrl } from "./api.ts";
+import {
+  hasLocalPkceVerifier,
+  hasMeaningfulLegacyLedgerData,
+  parseSafeDeepLinkAction,
+} from "./security-guards.ts";
+import { getSupabaseClient, SUPABASE_AUTH_STORAGE_KEY } from "../supabase/client.ts";
 import {
   canAdminRole,
   canEditWorkspace,
@@ -431,5 +438,77 @@ test("Mobile UUID, /appledesign1 themes, and Apple Wallet card rename/customizat
   assert.equal(addedCard?.last4, "8421");
   clearFinanceTenantScope();
 });
+
+test("Security audit client regressions: PKCE deep-link guard, redirect sanitizer, legacy migration consent, and receipt queue wipe", () => {
+  // 1. Implicit-grant bearer tokens in deep-links are rejected; only PKCE code + invite code are parsed
+  const maliciousImplicit = parseSafeDeepLinkAction(
+    "com.mizan.finance://auth#access_token=attacker_jwt&refresh_token=attacker_rt&type=recovery",
+  );
+  assert.equal(maliciousImplicit.rejectedImplicitTokens, true);
+  assert.equal(maliciousImplicit.pkceCode, null);
+
+  const validPkce = parseSafeDeepLinkAction("com.mizan.finance://auth?code=pkce-auth-code-123&type=recovery");
+  assert.equal(validPkce.rejectedImplicitTokens, false);
+  assert.equal(validPkce.pkceCode, "pkce-auth-code-123");
+  assert.equal(validPkce.linkType, "recovery");
+
+  const inviteLink = parseSafeDeepLinkAction("https://mizan-finance-rho.vercel.app/invite/mzn-abcd-1234");
+  assert.equal(inviteLink.inviteCode, "MZN-ABCD-1234");
+  assert.equal(inviteLink.rejectedImplicitTokens, false);
+
+  // 2. Local PKCE verifier check requires stored code-verifier
+  const pkceMem = new MemoryStorage();
+  assert.equal(hasLocalPkceVerifier(pkceMem as unknown as Storage), false);
+  pkceMem.setItem(`${SUPABASE_AUTH_STORAGE_KEY}-code-verifier`, "verifier-secret-value");
+  assert.equal(hasLocalPkceVerifier(pkceMem as unknown as Storage), true);
+
+  // 3. Auth redirect sanitizer blocks arbitrary domains & foreign *.vercel.app tenants
+  assert.equal(
+    sanitizeAuthRedirectUrl("https://attacker-controlled.vercel.app/steal"),
+    "https://mizan-finance-rho.vercel.app/",
+  );
+  assert.equal(
+    sanitizeAuthRedirectUrl("https://mizan-finance-evil.vercel.app/steal"),
+    "https://mizan-finance-rho.vercel.app/",
+  );
+  assert.equal(
+    sanitizeAuthRedirectUrl("https://mizan-z-zyadgams-projects.vercel.app/reset"),
+    "https://mizan-z-zyadgams-projects.vercel.app/",
+  );
+  assert.equal(
+    sanitizeAuthRedirectUrl("https://evil.example/phish"),
+    "https://mizan-finance-rho.vercel.app/",
+  );
+  assert.equal(
+    sanitizeAuthRedirectUrl("https://mizan-finance-rho.vercel.app/reset"),
+    "https://mizan-finance-rho.vercel.app/",
+  );
+  assert.equal(sanitizeAuthRedirectUrl("com.mizan.finance://callback"), "com.mizan.finance://auth");
+
+  // 4. Meaningful legacy data detector ignores empty seed data and flags real records
+  const emptySeed = { ...seedData(), txns: [], people: [], debts: [], payments: [], goals: [], goalMoves: [], budgets: [], recurring: [], transfers: [], openingBalance: 0 };
+  assert.equal(hasMeaningfulLegacyLedgerData(emptySeed), false);
+  assert.equal(hasMeaningfulLegacyLedgerData({ ...emptySeed, openingBalance: 500 }), true);
+
+  // 5. Receipt upload/delete queues and PKCE verifiers are wiped on revocation & sign-out
+  const receiptMem = new MemoryStorage();
+  receiptMem.setItem("mizan.receiptUploads.t-revoked.v1", JSON.stringify(["r-1"]));
+  receiptMem.setItem("mizan.receiptDeletes.t-revoked.v1", JSON.stringify(["r-2"]));
+  receiptMem.setItem("mizan.receiptUploads.t-keep.v1", JSON.stringify(["r-3"]));
+  receiptMem.setItem(`${SUPABASE_AUTH_STORAGE_KEY}-code-verifier`, "v-1");
+
+  wipeTenantCache("t-revoked", receiptMem as unknown as Storage);
+  assert.equal(receiptMem.getItem("mizan.receiptUploads.t-revoked.v1"), null);
+  assert.equal(receiptMem.getItem("mizan.receiptDeletes.t-revoked.v1"), null);
+  assert.ok(receiptMem.getItem("mizan.receiptUploads.t-keep.v1"));
+
+  wipeAllTenantCachesOnSignOut(receiptMem as unknown as Storage);
+  assert.equal(receiptMem.getItem("mizan.receiptUploads.t-keep.v1"), null);
+  assert.equal(receiptMem.getItem(`${SUPABASE_AUTH_STORAGE_KEY}-code-verifier`), null);
+
+  // Ensure Supabase client initializes cleanly with PKCE flow
+  assert.ok(getSupabaseClient());
+});
+
 
 

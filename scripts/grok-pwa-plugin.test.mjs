@@ -478,9 +478,14 @@ test("filters non-document paths", () => {
   assert.equal(isDocumentPath("/logo.png"), false);
 });
 
-test("strips install params from the app link", () => {
+test("strips install params from the app link and neutralizes protocol-relative open redirects", () => {
   assert.equal(stripInstallParams("/?install=1&platform=ios"), "/");
   assert.equal(stripInstallParams("/app?install=1&platform=ios&tab=2"), "/app?tab=2");
+  assert.equal(stripInstallParams("//evil.example/login?install=1&platform=ios"), "/evil.example/login");
+  assert.equal(stripInstallParams("/\\evil.example?install=1&platform=ios"), "/evil.example");
+  const html = renderInstallPage("mizan-finance-rho.vercel.app", "//evil.example/login?install=1&platform=ios");
+  assert.doesNotMatch(html, /href="\/\/evil\.example/);
+  assert.match(html, /href="\/evil\.example\/login"/);
 });
 
 test("names the install page from host slug", () => {
