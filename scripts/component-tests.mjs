@@ -853,4 +853,27 @@ test("HomeScreen renders Apple Wallet cards with direct rename buttons and /appl
   assert.equal(win.document.documentElement.dataset.appleTheme, "titanium-pro");
 });
 
+test("MizanRoot boots cleanly even when Android MizanNative bridge throws on consumeLaunchUrl", async () => {
+  const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
+
+  win.MizanNative = {
+    consumeLaunchUrl() {
+      throw new Error("Java exception was raised during method invocation");
+    },
+    setSystemBarStyle() {
+      throw new Error("Java exception was raised during method invocation");
+    },
+  };
+
+  try {
+    render(React.createElement(MizanRoot, { skipSplash: true }));
+    const heading = await screen.findByText(/ميزان لإدارة أموالك/);
+    assert.ok(heading);
+    assert.equal(win.document.querySelector("[data-testid=mizan-error-boundary]"), null);
+  } finally {
+    delete win.MizanNative;
+  }
+});
+
+
 

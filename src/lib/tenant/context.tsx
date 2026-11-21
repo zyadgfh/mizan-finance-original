@@ -588,9 +588,13 @@ export function TenantProvider({
 
     if (typeof window !== "undefined") {
       window.addEventListener("mizan:deeplink", onNativeDeepLink);
-      const nativeBridge = (window as unknown as { MizanNative?: { consumeLaunchUrl?: () => string } }).MizanNative;
-      const launchUrl = nativeBridge?.consumeLaunchUrl?.();
-      if (launchUrl) void handleDeepLinkUrl(launchUrl);
+      try {
+        const nativeBridge = (window as unknown as { MizanNative?: { consumeLaunchUrl?: () => string } }).MizanNative;
+        const launchUrl = nativeBridge?.consumeLaunchUrl?.();
+        if (launchUrl) void handleDeepLinkUrl(launchUrl);
+      } catch {
+        // Never allow a native WebView bridge exception to crash root mount
+      }
     }
 
     return () => {

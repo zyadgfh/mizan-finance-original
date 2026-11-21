@@ -8,6 +8,7 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Looper;
 import android.util.Base64;
 import android.view.View;
 import android.view.Window;
@@ -26,9 +27,11 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.WebViewListener;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
@@ -41,6 +44,12 @@ public class MainActivity extends BridgeActivity {
     );
 
     private volatile String pendingLaunchUrl = null;
+    /**
+     * Last known WebView URL captured exclusively on the Android UI thread.
+     * `@JavascriptInterface` methods run on the background `JavaBridge` thread,
+     * where calling `webView.getUrl()` directly throws a WebView thread violation.
+     */
+    private volatile String currentWebUrl = null;
 
     /**
      * A single biometric prompt may be open at a time. The WebView can fire the
@@ -134,17 +143,41 @@ public class MainActivity extends BridgeActivity {
             + "," + (ok ? "true" : "false")
             + "," + JSONObject.quote(code == null ? "" : code)
             + ");";
-        runOnUiThread(() -> webView.evaluateJavascript(js, null));
+        runOnUiThread(() -> {
+            try {
+                webView.evaluateJavascript(js, null);
+            } catch (Throwable ignored) {
+            }
+        });
     }
 
     private boolean isTrustedWebOrigin() {
-        WebView webView = getBridge() != null ? getBridge().getWebView() : null;
-        if (webView == null) return false;
-        String url = webView.getUrl();
-        if (url == null) return false;
-        Uri uri = Uri.parse(url);
-        if (!"https".equalsIgnoreCase(uri.getScheme())) return false;
-        return TRUSTED_WEB_HOSTS.contains(uri.getHost());
+        try {
+            String url = currentWebUrl;
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+                if (webView != null) {
+                    String liveUrl = webView.getUrl();
+                    if (liveUrl != null && !liveUrl.trim().isEmpty()) {
+                        url = liveUrl;
+                        currentWebUrl = liveUrl;
+                    }
+                }
+            }
+            if ((url == null || url.trim().isEmpty()) && getBridge() != null) {
+                url = getBridge().getAppUrl();
+            }
+            if ((url == null || url.trim().isEmpty()) && getBridge() != null) {
+                url = getBridge().getLocalUrl();
+            }
+            if (url == null || url.trim().isEmpty()) return false;
+            Uri uri = Uri.parse(url);
+            if (!"https".equalsIgnoreCase(uri.getScheme())) return false;
+            String host = uri.getHost();
+            return host != null && TRUSTED_WEB_HOSTS.contains(host.toLowerCase(Locale.ROOT));
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     @Override
@@ -171,6 +204,44 @@ public class MainActivity extends BridgeActivity {
 
         if (getBridge() != null && getBridge().getWebView() != null) {
             WebView wv = getBridge().getWebView();
+            String initialUrl = wv.getUrl();
+            if (initialUrl == null || initialUrl.trim().isEmpty()) {
+                initialUrl = getBridge().getAppUrl();
+            }
+            if (initialUrl == null || initialUrl.trim().isEmpty()) {
+                initialUrl = getBridge().getLocalUrl();
+            }
+            currentWebUrl = initialUrl;
+
+            getBridge().addWebViewListener(new WebViewListener() {
+                @Override
+                public void onPageStarted(WebView view) {
+                    if (view != null) {
+                        String u = view.getUrl();
+                        if (u != null && !u.trim().isEmpty()) {
+                            currentWebUrl = u;
+                        }
+                    }
+                }
+
+                @Override
+                public void onPageCommitVisible(WebView view, String url) {
+                    if (url != null && !url.trim().isEmpty()) {
+                        currentWebUrl = url;
+                    }
+                }
+
+                @Override
+                public void onPageLoaded(WebView view) {
+                    if (view != null) {
+                        String u = view.getUrl();
+                        if (u != null && !u.trim().isEmpty()) {
+                            currentWebUrl = u;
+                        }
+                    }
+                }
+            });
+
             WebSettings settings = wv.getSettings();
             settings.setDomStorageEnabled(true);
             // The app is served from https://localhost; raw file:// access is
@@ -265,14 +336,22 @@ public class MainActivity extends BridgeActivity {
          */
         @JavascriptInterface
         public boolean biometricAvailable() {
-            if (!isTrustedWebOrigin()) return false;
-            return MainActivity.this.biometricSensorAvailable();
+            try {
+                if (!isTrustedWebOrigin()) return false;
+                return MainActivity.this.biometricSensorAvailable();
+            } catch (Throwable t) {
+                return false;
+            }
         }
 
         @JavascriptInterface
         public boolean authenticateBiometric(String requestId) {
-            if (!isTrustedWebOrigin()) return false;
-            return MainActivity.this.startBiometricPrompt(requestId);
+            try {
+                if (!isTrustedWebOrigin()) return false;
+                return MainActivity.this.startBiometricPrompt(requestId);
+            } catch (Throwable t) {
+                return false;
+            }
         }
 
         private boolean dispatchShareBytes(String filename, String mimeType, byte[] bytes) {
@@ -301,74 +380,92 @@ public class MainActivity extends BridgeActivity {
                 chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 runOnUiThread(() -> startActivity(chooser));
                 return true;
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 return false;
             }
         }
 
         @JavascriptInterface
         public String consumeLaunchUrl() {
-            if (!isTrustedWebOrigin()) return "";
-            String url = pendingLaunchUrl;
-            pendingLaunchUrl = null;
-            return url == null ? "" : url;
+            try {
+                if (!isTrustedWebOrigin()) return "";
+                String url = pendingLaunchUrl;
+                pendingLaunchUrl = null;
+                return url == null ? "" : url;
+            } catch (Throwable t) {
+                return "";
+            }
         }
 
         @JavascriptInterface
         public boolean shareFile(String filename, String mimeType, String content) {
-            if (!isTrustedWebOrigin()) return false;
-            byte[] bytes = (content == null ? "" : content).getBytes(StandardCharsets.UTF_8);
-            return dispatchShareBytes(filename, mimeType, bytes);
+            try {
+                if (!isTrustedWebOrigin()) return false;
+                byte[] bytes = (content == null ? "" : content).getBytes(StandardCharsets.UTF_8);
+                return dispatchShareBytes(filename, mimeType, bytes);
+            } catch (Throwable t) {
+                return false;
+            }
         }
 
         @JavascriptInterface
         public boolean shareBinaryFile(String filename, String mimeType, String base64Content) {
-            if (!isTrustedWebOrigin()) return false;
             try {
+                if (!isTrustedWebOrigin()) return false;
                 byte[] bytes = Base64.decode(base64Content == null ? "" : base64Content, Base64.DEFAULT);
                 return dispatchShareBytes(filename, mimeType, bytes);
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 return false;
             }
         }
 
         @JavascriptInterface
         public boolean copyToClipboard(String text) {
-            if (!isTrustedWebOrigin()) return false;
             try {
+                if (!isTrustedWebOrigin()) return false;
                 final String safeText = text == null ? "" : text;
                 runOnUiThread(() -> {
-                    ClipboardManager clipboard =
-                        (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                    if (clipboard != null) {
-                        ClipData clip = ClipData.newPlainText("Mizan", safeText);
-                        clipboard.setPrimaryClip(clip);
+                    try {
+                        ClipboardManager clipboard =
+                            (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                        if (clipboard != null) {
+                            ClipData clip = ClipData.newPlainText("Mizan", safeText);
+                            clipboard.setPrimaryClip(clip);
+                        }
+                    } catch (Throwable ignored) {
                     }
                 });
                 return true;
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 return false;
             }
         }
 
         @JavascriptInterface
         public boolean setScreenSecure(boolean secure) {
-            if (!isTrustedWebOrigin()) return false;
-            runOnUiThread(() -> {
-                if (secure) {
-                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
-                } else {
-                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-                }
-            });
-            return true;
+            try {
+                if (!isTrustedWebOrigin()) return false;
+                runOnUiThread(() -> {
+                    try {
+                        if (secure) {
+                            getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                        } else {
+                            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                });
+                return true;
+            } catch (Throwable t) {
+                return false;
+            }
         }
 
         @JavascriptInterface
         @SuppressWarnings("deprecation")
         public boolean setSystemBarStyle(String hexColor, final boolean darkIcons) {
-            if (!isTrustedWebOrigin()) return false;
             try {
+                if (!isTrustedWebOrigin()) return false;
                 final int parsedColor = Color.parseColor(
                     (hexColor == null || hexColor.trim().isEmpty()) ? "#05070c" : hexColor.trim()
                 );
@@ -389,11 +486,11 @@ public class MainActivity extends BridgeActivity {
                             controller.setAppearanceLightStatusBars(darkIcons);
                             controller.setAppearanceLightNavigationBars(darkIcons);
                         }
-                    } catch (Exception ignored) {
+                    } catch (Throwable ignored) {
                     }
                 });
                 return true;
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 return false;
             }
         }
