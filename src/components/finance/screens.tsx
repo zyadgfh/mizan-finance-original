@@ -38,6 +38,8 @@ import {
 import { clearErrorLogs, loadErrorLogs } from "@/lib/finance/error-log";
 import { useBackupReminderStatus } from "@/lib/finance/backup-reminder";
 import { useI18n } from "@/lib/finance/i18n";
+import { getNativeAppVersion, isNativeMobileApp } from "@/lib/mobile-safe";
+import { triggerManualApkUpdateCheck } from "@/lib/update/apk-updater";
 import {
   budgetAlerts,
   cashPosition,
@@ -1958,6 +1960,28 @@ export function MoreScreen() {
 
       <Section title={t("perfAndErrors")}>
         <Group sep="icon">
+          {isNativeMobileApp() ? (
+            <Row
+              leading={
+                <span className="icon-tile" style={{ background: "var(--tint)" }}>
+                  <Sparkles size={16} />
+                </span>
+              }
+              title={lang === "en" ? "App Version & Updates" : "إصدار التطبيق والتحديثات"}
+              sub={
+                getNativeAppVersion()
+                  ? `v${getNativeAppVersion()}`
+                  : lang === "en"
+                    ? "Android Native APK"
+                    : "نسخة أندرويد الأصلية"
+              }
+              trailing={
+                <PillButton tone="plain" onClick={() => triggerManualApkUpdateCheck()}>
+                  {lang === "en" ? "Check" : "فحص التحديثات"}
+                </PillButton>
+              }
+            />
+          ) : null}
           <Row
             leading={
               <span className="icon-tile" style={{ background: "var(--gray)" }}>

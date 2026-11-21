@@ -720,17 +720,12 @@ test("AuthScreen supports Email-or-Phone login, 2-step New Account Registration 
     assert.ok(screen.getAllByText(/سنة كاملة/).length >= 1);
   });
 
-  // Fill phone + verification email + password and advance to Step 2 ("الدفع").
-  // Phone identities must supply a real mailbox so the account can be verified.
+  // Fill Egyptian phone + password and advance directly to Step 2 ("الدفع").
+  // Account activation happens via Super-Admin approval of the transfer receipt.
   fireEvent.change(screen.getByPlaceholderText("010xxxxxxxx أو name@mail.com"), {
     target: { value: "01012345678" },
   });
-  await waitFor(() => {
-    assert.ok(screen.getByText(/البريد الإلكتروني لتأكيد الحساب/));
-  });
-  fireEvent.change(screen.getByPlaceholderText("name@mail.com"), {
-    target: { value: "subscriber@example.com" },
-  });
+  assert.equal(screen.queryByText(/البريد الإلكتروني لتأكيد الحساب/), null);
   fireEvent.change(screen.getByPlaceholderText("••••••••"), {
     target: { value: "secret123" },
   });
@@ -874,6 +869,83 @@ test("MizanRoot boots cleanly even when Android MizanNative bridge throws on con
     delete win.MizanNative;
   }
 });
+
+test("ApkUpdateBanner renders blocking modal for [CRITICAL] release and opens external download", async () => {
+  const { ApkUpdateBanner } = await viteServer.ssrLoadModule(
+    "/src/components/finance/apk-update-banner.tsx",
+  );
+  const { triggerManualApkUpdateCheck } = await viteServer.ssrLoadModule(
+    "/src/lib/update/apk-updater.ts",
+  );
+
+  let openedUrl = "";
+  const originalFetch = globalThis.fetch;
+  win.MizanNative = {
+    getAppVersion: () => "2.0.80",
+    openExternalUrl: (url) => {
+      openedUrl = url;
+      return true;
+    },
+  };
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        tag_name: "v2.0.95",
+        name: "Mizan Finance v2.0.95 [CRITICAL]",
+        body: "تحديث أمني حرج ومزامنة فورية",
+        draft: false,
+        prerelease: false,
+        assets: [
+          {
+            name: "mizan-finance-release.apk",
+            browser_download_url:
+              "https://github.com/zyadgfh/mizan-finance-original/releases/download/v2.0.95/mizan-finance-release.apk",
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  try {
+    render(React.createElement(ApkUpdateBanner));
+    await waitFor(() => {
+      triggerManualApkUpdateCheck();
+      assert.ok(screen.getByText(/يلزم تحديث تطبيق ميزان للمتابعة/));
+    });
+
+    const downloadBtn = screen.getByRole("button", { name: /تحميل التحديث الإجباري الآن/ });
+    fireEvent.click(downloadBtn);
+    assert.equal(
+      openedUrl,
+      "https://github.com/zyadgfh/mizan-finance-original/releases/download/v2.0.95/mizan-finance-release.apk",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete win.MizanNative;
+    win.sessionStorage.clear();
+  }
+});
+
+test("AuthScreen allows Egyptian phone signup to proceed to payment step without requiring a separate email", async () => {
+  const { AuthScreen } = await viteServer.ssrLoadModule("/src/components/finance/auth-screen.tsx");
+
+  render(React.createElement(AuthScreen));
+  fireEvent.click(screen.getAllByRole("button", { name: /تسجيل حساب جديد/ })[0]);
+
+  const phoneInput = await screen.findByPlaceholderText(/010xxxxxxxx/);
+  fireEvent.change(phoneInput, { target: { value: "01012345678" } });
+
+  const passInput = screen.getByPlaceholderText("••••••••");
+  fireEvent.change(passInput, { target: { value: "StrongPass123" } });
+
+  const nextBtn = screen.getByRole("button", { name: /الدفع \(/ });
+  fireEvent.click(nextBtn);
+
+  // Advances directly to step 2 (payment proof) without asking for an email
+  const proofPrompt = await screen.findByText(/اختر وسيلة التحويل/);
+  assert.ok(proofPrompt);
+});
+
 
 
 

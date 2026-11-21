@@ -521,22 +521,7 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Strict verification: the account is only usable after a real mailbox is
-    // confirmed, so phone-only signups must also provide an email address.
-    const verificationEmail =
-      identity.kind === "email" ? identity.authEmail : contactEmail;
-
-    if (identity.kind === "phone" && !isDeliverableEmail(contactEmail)) {
-      return jsonResponse(
-        req,
-        { error: "أدخل بريداً إلكترونياً صحيحاً لتأكيد الحساب (رقم الهاتف وحده لا يكفي)" },
-        400,
-      );
-    }
-
-    if (!isDeliverableEmail(verificationEmail)) {
-      return jsonResponse(req, { error: "أدخل بريداً إلكترونياً صحيحاً" }, 400);
-    }
+    const optionalContactEmail = isDeliverableEmail(contactEmail) ? contactEmail : null;
 
     const { data: platformSettings } = await admin
       .from("platform_settings")
@@ -544,9 +529,10 @@ Deno.serve(async (req: Request) => {
       .eq("id", 1)
       .maybeSingle();
 
+    const ownerEmailNormalized = String(platformSettings?.owner_email ?? "").trim().toLowerCase();
     if (
-      platformSettings?.owner_email &&
-      verificationEmail === String(platformSettings.owner_email).trim().toLowerCase()
+      ownerEmailNormalized &&
+      (identity.authEmail === ownerEmailNormalized || optionalContactEmail === ownerEmailNormalized)
     ) {
       return jsonResponse(
         req,
@@ -574,32 +560,99 @@ Deno.serve(async (req: Request) => {
       rawDisplayName ||
       (identity.kind === "email" ? identity.contactDisplay.split("@")[0] : `مشترك ${identity.contactDisplay}`);
 
-    const { data: created, error: createErr } = await admin.auth.admin.createUser({
-      email: verificationEmail,
+    const userMetadata: Record<string, unknown> = {
+      display_name: displayName,
+      full_name: displayName,
+      phone: identity.phone,
+      contact_display: identity.contactDisplay,
+      ...(optionalContactEmail ? { contact_email: optionalContactEmail } : {}),
+    };
+
+    // Never auto-confirm on public self-signup: account remains locked until
+    // either Super-Admin approves the transfer receipt or mailbox is verified.
+    let { data: created, error: createErr } = await admin.auth.admin.createUser({
+      email: identity.authEmail,
       password,
-      // Ownership of the mailbox must be proven before the account can sign in.
       email_confirm: false,
-      user_metadata: {
-        display_name: displayName,
-        full_name: displayName,
-        phone: identity.phone,
-        contact_display: identity.contactDisplay,
-      },
+      user_metadata: userMetadata,
     });
 
     if (createErr || !created?.user) {
       const msg = (createErr?.message ?? "").toLowerCase();
       if (msg.includes("already") || msg.includes("registered") || msg.includes("exists")) {
-        return jsonResponse(
-        req,
-          {
-            error:
-              "هذا البريد الإلكتروني أو رقم الهاتف مسجّل بالفعل. قم بتسجيل الدخول لمتابعة حالة طلبك أو تجديد اشتراكك.",
-          },
-          409,
+        // Check whether this is an unconfirmed account whose previous payment request was rejected.
+        const { data: listedUsers } = await admin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+        const existingAuth = listedUsers?.users?.find(
+          (u) => (u.email ?? "").toLowerCase() === identity.authEmail.toLowerCase(),
         );
+
+        if (existingAuth && !existingAuth.email_confirmed_at) {
+          const [{ data: existingAdmin }, { data: existingReqs }, { data: existingTenants }] =
+            await Promise.all([
+              admin.from("platform_admins").select("user_id").eq("user_id", existingAuth.id).maybeSingle(),
+              admin.from("payment_requests").select("id, status").eq("submitted_by", existingAuth.id),
+              admin
+                .from("tenants")
+                .select("id, subscription_status, deleted_at")
+                .eq("owner_id", existingAuth.id)
+                .is("deleted_at", null),
+            ]);
+
+          const hasPending = (existingReqs ?? []).some((r) => r.status === "pending");
+          const hasApproved = (existingReqs ?? []).some((r) => r.status === "approved");
+          const hasActiveWorkspace = (existingTenants ?? []).some((t) =>
+            ["active", "trialing"].includes(String(t.subscription_status ?? "")),
+          );
+
+          if (hasPending) {
+            return jsonResponse(
+              req,
+              {
+                error:
+                  "تم استلام طلب اشتراكك بالفعل وهو قيد المراجعة حالياً — سيتفعل حسابك فور تأكيد إيصال التحويل من إدارة المنصة.",
+              },
+              409,
+            );
+          }
+
+          if (!existingAdmin && !hasApproved && !hasActiveWorkspace) {
+            // Safe re-registration after a rejected/orphaned unconfirmed signup
+            await admin.from("payment_requests").delete().eq("submitted_by", existingAuth.id);
+            const staleTenantIds = (existingTenants ?? []).map((t) => String(t.id));
+            if (staleTenantIds.length > 0) {
+              await admin.from("tenant_members").delete().in("tenant_id", staleTenantIds);
+              await admin
+                .from("tenants")
+                .update({ deleted_at: new Date().toISOString(), subscription_status: "suspended" })
+                .in("id", staleTenantIds);
+            }
+            await admin.from("profiles").delete().eq("id", existingAuth.id);
+            await admin.auth.admin.deleteUser(existingAuth.id);
+
+            const retried = await admin.auth.admin.createUser({
+              email: identity.authEmail,
+              password,
+              email_confirm: false,
+              user_metadata: userMetadata,
+            });
+            created = retried.data;
+            createErr = retried.error;
+          }
+        }
+
+        if (createErr || !created?.user) {
+          return jsonResponse(
+            req,
+            {
+              error:
+                "هذا البريد الإلكتروني أو رقم الهاتف مسجّل بالفعل. قم بتسجيل الدخول لمتابعة حالة طلبك أو تجديد اشتراكك.",
+            },
+            409,
+          );
+        }
+      } else {
+        return jsonResponse(req, { error: createErr?.message ?? "تعذّر إنشاء الحساب، حاول مرة أخرى" }, 400);
       }
-      return jsonResponse(req, { error: createErr?.message ?? "تعذّر إنشاء الحساب، حاول مرة أخرى" }, 400);
     }
 
     const newUserId = created.user.id;
@@ -633,7 +686,7 @@ Deno.serve(async (req: Request) => {
     try {
       const { error: profileErr } = await admin.from("profiles").upsert({
         id: newUserId,
-        email: verificationEmail,
+        email: optionalContactEmail ?? identity.authEmail,
         phone: identity.phone,
         contact_display: identity.contactDisplay,
         display_name: displayName,
@@ -727,13 +780,22 @@ Deno.serve(async (req: Request) => {
         await securityLog("signup.audit_failed", "warning", { message: auditErr.message }, newUserId);
       }
 
-      const verificationSent = await sendVerificationEmail(verificationEmail);
-      await securityLog("signup.submitted", "info", { verificationSent }, newUserId);
+      const verificationSent =
+        identity.kind === "email" && isDeliverableEmail(identity.authEmail)
+          ? await sendVerificationEmail(identity.authEmail)
+          : false;
+      await securityLog(
+        "signup.submitted",
+        "info",
+        { verificationSent, identityKind: identity.kind },
+        newUserId,
+      );
 
       return jsonResponse(req, {
         ok: true,
-        authEmail: verificationEmail,
+        authEmail: identity.authEmail,
         contactDisplay: identity.contactDisplay,
+        identityKind: identity.kind,
         tenantId,
         requestId: reqRow?.id ?? requestId,
         requiresEmailVerification: true,
@@ -908,6 +970,118 @@ Deno.serve(async (req: Request) => {
     return jsonResponse(req, { error: "هذه العملية مقتصرة على مالك المنصة فقط" }, 403);
   }
 
+  const callerClient = createClient(supabaseUrl, anonKey || serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+    global: { headers: { Authorization: `Bearer ${jwt}` } },
+  });
+
+  if (action === "review_payment") {
+    const requestId = String(payload.requestId ?? "").trim();
+    const decision = String(payload.decision ?? "").trim();
+    const adminNote =
+      typeof payload.adminNote === "string" && payload.adminNote.trim()
+        ? payload.adminNote.trim()
+        : null;
+
+    if (!requestId || !["approved", "rejected"].includes(decision)) {
+      return jsonResponse(req, { error: "بيانات مراجعة الطلب غير مكتملة" }, 400);
+    }
+
+    const { data: reviewedReq, error: rpcErr } = await callerClient.rpc(
+      "admin_review_payment_request",
+      {
+        p_request_id: requestId,
+        p_decision: decision,
+        p_admin_note: adminNote,
+      },
+    );
+
+    if (rpcErr || !reviewedReq) {
+      return jsonResponse(req, { error: rpcErr?.message ?? "تعذّر مراجعة طلب التحويل" }, 400);
+    }
+
+    const reqObj = reviewedReq as Record<string, unknown>;
+    let accountConfirmed = false;
+
+    if (decision === "approved" && reqObj.submitted_by) {
+      const targetUserId = String(reqObj.submitted_by);
+      const { data: targetUser } = await admin.auth.admin.getUserById(targetUserId);
+      if (targetUser?.user && !targetUser.user.email_confirmed_at) {
+        const { error: confErr } = await admin.auth.admin.updateUserById(targetUserId, {
+          email_confirm: true,
+        });
+        if (!confErr) {
+          accountConfirmed = true;
+        }
+      } else if (targetUser?.user?.email_confirmed_at) {
+        accountConfirmed = true;
+      }
+
+      await securityLog(
+        "admin.payment_approved",
+        "info",
+        { requestId, targetUserId, accountConfirmed },
+        callerId,
+      );
+    }
+
+    return jsonResponse(req, { ok: true, request: reqObj, accountConfirmed });
+  }
+
+  if (action === "update_tenant_subscription") {
+    const tenantId = String(payload.tenantId ?? "").trim();
+    if (!tenantId) {
+      return jsonResponse(req, { error: "معرّف المساحة مطلوب" }, 400);
+    }
+
+    const planCode =
+      typeof payload.planCode === "string" && payload.planCode.trim()
+        ? payload.planCode.trim()
+        : null;
+    const status =
+      typeof payload.status === "string" && payload.status.trim() ? payload.status.trim() : null;
+    const extendDays = Number(payload.extendDays ?? 0) || 0;
+    const exactPeriodEnd =
+      typeof payload.exactPeriodEnd === "string" && payload.exactPeriodEnd.trim()
+        ? payload.exactPeriodEnd.trim()
+        : null;
+
+    const { error: rpcErr } = await callerClient.rpc("admin_update_tenant_subscription", {
+      p_tenant_id: tenantId,
+      p_plan_code: planCode,
+      p_status: status,
+      p_extend_days: extendDays,
+      p_exact_period_end: exactPeriodEnd,
+    });
+
+    if (rpcErr) {
+      return jsonResponse(req, { error: rpcErr.message }, 400);
+    }
+
+    let ownerConfirmed = false;
+    if (status === "active" || status === "trialing" || extendDays > 0) {
+      const { data: tenantRow } = await admin
+        .from("tenants")
+        .select("owner_id, subscription_status")
+        .eq("id", tenantId)
+        .maybeSingle();
+
+      const ownerId = tenantRow?.owner_id ? String(tenantRow.owner_id) : "";
+      const effectiveStatus = String(tenantRow?.subscription_status ?? "");
+      if (ownerId && ["active", "trialing"].includes(effectiveStatus)) {
+        const { data: ownerUser } = await admin.auth.admin.getUserById(ownerId);
+        if (ownerUser?.user && !ownerUser.user.email_confirmed_at) {
+          const { error: confErr } = await admin.auth.admin.updateUserById(ownerId, {
+            email_confirm: true,
+          });
+          if (!confErr) ownerConfirmed = true;
+        }
+      }
+    }
+
+    return jsonResponse(req, { ok: true, ownerConfirmed });
+  }
+
   if (action === "list_users") {
     const [{ data: usersPage, error: listErr }, { data: adminRows }, { data: memberRows }, { data: profileRows }] =
       await Promise.all([
@@ -996,16 +1170,18 @@ Deno.serve(async (req: Request) => {
     const identity = normalizeSubscriberIdentity(rawIdentifier);
     const password = String(payload.password ?? "");
     const workspaceMode = String(payload.workspaceMode ?? "create");
+    const requestedSubStatus = ["active", "trialing", "pending_approval"].includes(
+      String(payload.subscriptionStatus),
+    )
+      ? String(payload.subscriptionStatus)
+      : "active";
+    const autoConfirm =
+      typeof payload.autoConfirm === "boolean"
+        ? payload.autoConfirm
+        : workspaceMode !== "create" || requestedSubStatus !== "pending_approval";
 
     if (!identity) {
       return jsonResponse(req, { error: "أدخل بريداً إلكترونياً أو رقم هاتف صحيح" }, 400);
-    }
-    if (!isDeliverableEmail(identity.authEmail)) {
-      return jsonResponse(
-        req,
-        { error: "يتطلب إنشاء الحساب بريداً إلكترونياً حقيقياً لتأكيد الهوية" },
-        400,
-      );
     }
     if (password.length < 8) {
       return jsonResponse(req, { error: "كلمة المرور يجب ألا تقل عن 8 أحرف" }, 400);
@@ -1018,7 +1194,7 @@ Deno.serve(async (req: Request) => {
     const { data: created, error: createErr } = await admin.auth.admin.createUser({
       email: identity.authEmail,
       password,
-      email_confirm: false,
+      email_confirm: autoConfirm,
       user_metadata: {
         display_name: displayName,
         full_name: displayName,
@@ -1032,11 +1208,14 @@ Deno.serve(async (req: Request) => {
     }
 
     const newUserId = created.user.id;
-    const verificationSent = await sendVerificationEmail(identity.authEmail);
+    const verificationSent =
+      !autoConfirm && identity.kind === "email" && isDeliverableEmail(identity.authEmail)
+        ? await sendVerificationEmail(identity.authEmail)
+        : false;
     await securityLog(
       "admin.user_created",
       "warning",
-      { verificationSent, workspaceMode },
+      { verificationSent, workspaceMode, autoConfirm, identityKind: identity.kind },
       callerId,
     );
 
@@ -1141,7 +1320,7 @@ Deno.serve(async (req: Request) => {
       ok: true,
       user: { id: newUserId, email: identity.contactDisplay, displayName },
       tenantId: createdTenantId,
-      requiresEmailVerification: true,
+      requiresEmailVerification: !autoConfirm,
       verificationEmailSent: verificationSent,
     });
   }
@@ -1169,6 +1348,9 @@ Deno.serve(async (req: Request) => {
       }
       updates.ban_duration = payload.banned ? "876000h" : "none";
     }
+    if (payload.emailConfirm === true) {
+      updates.email_confirm = true;
+    }
 
     const { error: updErr } = await admin.auth.admin.updateUserById(userId, updates);
     if (updErr) return jsonResponse(req, { error: updErr.message }, 400);
@@ -1180,6 +1362,7 @@ Deno.serve(async (req: Request) => {
         targetUserId: userId,
         passwordChanged: Boolean(updates.password),
         banned: typeof payload.banned === "boolean" ? Boolean(payload.banned) : null,
+        emailConfirmed: Boolean(updates.email_confirm),
       },
       callerId,
     );

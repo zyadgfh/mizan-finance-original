@@ -246,6 +246,7 @@ export type SignupPendingVerification = {
   verificationEmailSent: boolean;
   authEmail: string;
   contactDisplay: string;
+  identityKind?: "email" | "phone";
 };
 
 /**
@@ -332,6 +333,7 @@ export async function registerNewSubscriberWithPayment(input: {
     verificationEmailSent: Boolean(res.verificationEmailSent),
     authEmail: String(res.authEmail ?? ""),
     contactDisplay: String(res.contactDisplay ?? input.identifier.trim()),
+    identityKind: res.identityKind === "phone" ? "phone" : "email",
   };
 }
 
@@ -779,14 +781,13 @@ export async function adminReviewPaymentRequest(input: {
   decision: "approved" | "rejected";
   adminNote?: string;
 }): Promise<PaymentRequestItem> {
-  const sb = getSupabaseClient();
-  const { data, error } = await sb.rpc("admin_review_payment_request", {
-    p_request_id: input.requestId,
-    p_decision: input.decision,
-    p_admin_note: input.adminNote?.trim() || null,
+  const res = await callAdminUsersFunction({
+    action: "review_payment",
+    requestId: input.requestId,
+    decision: input.decision,
+    adminNote: input.adminNote?.trim() || undefined,
   });
-  if (error) throw new Error(error.message);
-  return mapPaymentRequestRow(data as Record<string, unknown>);
+  return mapPaymentRequestRow((res.request ?? {}) as Record<string, unknown>);
 }
 
 export async function fetchTenantAuditLogs(tenantId: string, limit = 50): Promise<AuditLogItem[]> {
@@ -1012,15 +1013,14 @@ export async function adminUpdateTenantSubscription(input: {
   extendDays?: number;
   exactPeriodEnd?: string | null;
 }): Promise<void> {
-  const sb = getSupabaseClient();
-  const { error } = await sb.rpc("admin_update_tenant_subscription", {
-    p_tenant_id: input.tenantId,
-    p_plan_code: input.planCode ?? null,
-    p_status: input.status ?? null,
-    p_extend_days: input.extendDays ?? 0,
-    p_exact_period_end: input.exactPeriodEnd ?? null,
+  await callAdminUsersFunction({
+    action: "update_tenant_subscription",
+    tenantId: input.tenantId,
+    planCode: input.planCode ?? null,
+    status: input.status ?? null,
+    extendDays: input.extendDays ?? 0,
+    exactPeriodEnd: input.exactPeriodEnd ?? null,
   });
-  if (error) throw new Error(error.message);
 }
 
 export async function adminUpdatePlanPrice(code: PlanCode, priceEgp: number): Promise<void> {
@@ -1090,6 +1090,7 @@ export async function adminUpdateUserAccount(input: {
   password?: string;
   displayName?: string;
   banned?: boolean;
+  emailConfirm?: boolean;
 }): Promise<void> {
   await callAdminUsersFunction({
     action: "update_user",

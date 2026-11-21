@@ -9,6 +9,8 @@ type MizanNativeWindow = Window & {
   MizanNative?: {
     copyToClipboard?: (text: string) => boolean;
     consumeLaunchUrl?: () => string;
+    getAppVersion?: () => string;
+    openExternalUrl?: (url: string) => boolean;
     shareFile?: (filename: string, mimeType: string, content: string) => boolean;
     shareBinaryFile?: (filename: string, mimeType: string, base64Content: string) => boolean;
     setScreenSecure?: (secure: boolean) => boolean;
@@ -17,6 +19,39 @@ type MizanNativeWindow = Window & {
     isNativePlatform?: () => boolean;
   };
 };
+
+export function getNativeAppVersion(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    const fn = (window as MizanNativeWindow).MizanNative?.getAppVersion;
+    if (typeof fn === "function") {
+      return String(fn() ?? "").trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  return "";
+}
+
+export function openExternalUrlSafe(url: string): boolean {
+  if (!url || typeof window === "undefined") return false;
+  try {
+    const fn = (window as MizanNativeWindow).MizanNative?.openExternalUrl;
+    if (typeof fn === "function" && fn(url)) {
+      return true;
+    }
+  } catch {
+    /* fallback below */
+  }
+  try {
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    if (opened) return true;
+    window.location.assign(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function isNativeMobileApp(): boolean {
   if (typeof window === "undefined") return false;

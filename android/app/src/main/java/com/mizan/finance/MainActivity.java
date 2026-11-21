@@ -398,6 +398,48 @@ public class MainActivity extends BridgeActivity {
         }
 
         @JavascriptInterface
+        public String getAppVersion() {
+            try {
+                if (!isTrustedWebOrigin()) return "";
+                android.content.pm.PackageInfo info =
+                    getPackageManager().getPackageInfo(getPackageName(), 0);
+                return info != null && info.versionName != null ? info.versionName : "";
+            } catch (Throwable t) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean openExternalUrl(String rawUrl) {
+            try {
+                if (!isTrustedWebOrigin()) return false;
+                if (rawUrl == null || rawUrl.trim().isEmpty()) return false;
+                final Uri uri = Uri.parse(rawUrl.trim());
+                if (!"https".equalsIgnoreCase(uri.getScheme())) return false;
+                String host = uri.getHost() != null ? uri.getHost().toLowerCase(Locale.ROOT) : "";
+                String path = uri.getPath() != null ? uri.getPath() : "";
+                boolean allowedGithubRelease =
+                    "github.com".equals(host)
+                        && path.startsWith("/zyadgfh/mizan-finance-original/");
+                boolean allowedProdWeb = "mizan-finance-rho.vercel.app".equals(host);
+                if (!allowedGithubRelease && !allowedProdWeb) return false;
+
+                runOnUiThread(() -> {
+                    try {
+                        Intent viewIntent = new Intent(Intent.ACTION_VIEW, uri);
+                        viewIntent.addCategory(Intent.CATEGORY_BROWSABLE);
+                        viewIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(viewIntent);
+                    } catch (Throwable ignored) {
+                    }
+                });
+                return true;
+            } catch (Throwable t) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
         public boolean shareFile(String filename, String mimeType, String content) {
             try {
                 if (!isTrustedWebOrigin()) return false;

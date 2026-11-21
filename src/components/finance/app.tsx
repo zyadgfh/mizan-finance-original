@@ -28,6 +28,7 @@ import {
   type SheetState,
   type Tab,
 } from "@/components/finance/context";
+import { ApkUpdateBanner } from "@/components/finance/apk-update-banner";
 import { ErrorBoundary } from "@/components/finance/error-boundary";
 import { MotionScreen } from "@/components/finance/gsap-motion";
 import {
@@ -175,6 +176,7 @@ export function MizanRoot({
         requestedInviteCode={requestedInviteCode}
         initialSession={initialSession}
       >
+        <ApkUpdateBanner />
         <TenantAuthGate
           skipSplash={skipSplash}
           requestedInviteCode={requestedInviteCode}
