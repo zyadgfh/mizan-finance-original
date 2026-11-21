@@ -12,6 +12,10 @@ import { PillButton, Section, Segment, Sheet } from "@/components/finance/ui";
 import { cn } from "@/lib/cn";
 import { useI18n } from "@/lib/finance/i18n";
 import { GOAL_CATEGORY_LABEL, goalSaved, remaining, round2, todayISO, walletBalance } from "@/lib/finance/logic";
+import {
+  disableLedgerEncryption,
+  rewrapLedgerKeyForNewPin,
+} from "@/lib/finance/ledger-crypto";
 import { clearPinFailures, hashPin, pinLockoutRemainingMs, recordPinFailure, verifyPin } from "@/lib/finance/pin";
 import { useFinance } from "@/lib/finance/store";
 import type { GoalCategory, TxKind, WalletCardDesign, WalletKind } from "@/lib/finance/types";
@@ -886,6 +890,7 @@ export function PinForm() {
     clearPinFailures();
     const hashed = await hashPin(next);
     setPinHash(hashed);
+    await rewrapLedgerKeyForNewPin(next).catch(() => undefined);
     toast("تم حفظ الرمز");
     closeSheet();
   }
@@ -900,6 +905,7 @@ export function PinForm() {
       return;
     }
     clearPinFailures();
+    await disableLedgerEncryption(current).catch(() => undefined);
     setPinHash(null);
     toast("أُلغي القفل");
     closeSheet();

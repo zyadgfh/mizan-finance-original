@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { resetLedgerCryptoForTests } from "./ledger-crypto.ts";
 
 export const SECURITY_STORAGE_KEY = "mizan.security.v1";
 
@@ -336,6 +337,7 @@ export const MIZAN_LOCAL_STORAGE_KEYS = [
   "mizan.updatedAt",
   "mizan.pin",
   "mizan.security.v1",
+  "mizan.ledgerVault.v1",
   "mizan.ui-prefs.v1",
   "mizan.error-log.v1",
   "mizan.perf.v1",
@@ -349,6 +351,7 @@ export const MIZAN_LOCAL_STORAGE_KEYS = [
 export function overwriteAndClearLocalKeys(
   storage: Storage | undefined = typeof localStorage !== "undefined" ? localStorage : undefined,
 ): void {
+  resetLedgerCryptoForTests();
   if (!storage) return;
   const zeroPad = "0".repeat(256);
   const dynamicKeys: string[] = [];
@@ -359,6 +362,7 @@ export function overwriteAndClearLocalKeys(
       k.startsWith("mizan.tenant.") ||
       k.startsWith("mizan.user.") ||
       k.startsWith("mizan.auth.") ||
+      k.startsWith("mizan.zakat.") ||
       k === "mizan.migratedToTenant.v1" ||
       k === "mizan.supabase.auth.v1"
     ) {

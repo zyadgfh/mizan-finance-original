@@ -14,7 +14,7 @@ const TARGETS = [
     ],
     // Budget in bytes (gzip): keeps initial route & index tight while accounting for React/TanStack/GSAP/crypto
     maxLargestChunkGzipBytes: 185 * 1024,
-    maxTotalJsGzipBytes: 520 * 1024,
+    maxTotalJsGzipBytes: 565 * 1024,
     minTotalCssRawBytes: 55 * 1024,
   },
   {

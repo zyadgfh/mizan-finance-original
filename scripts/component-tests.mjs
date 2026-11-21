@@ -1006,6 +1006,126 @@ test("Phase 2: Offline SmartCaptureSheet records InstaPay SMS and ZakatScreen co
   });
 });
 
+test("Phase 3: Non-intrusive live sync preserves open TxnForm draft and SecurityScreen enables AES-256-GCM encryption", async () => {
+  const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
+  const { applySyncedTenantData, useFinance } = await viteServer.ssrLoadModule("/src/lib/finance/store.ts");
+  const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
+  const { hashPin, writePinHash } = await viteServer.ssrLoadModule("/src/lib/finance/pin.ts");
+  const { isEncryptedLedgerEnvelope, resetLedgerCryptoForTests } = await viteServer.ssrLoadModule(
+    "/src/lib/finance/ledger-crypto.ts",
+  );
+  const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
+
+  resetLedgerCryptoForTests();
+  updateUiPrefs({ language: "ar", numeralStyle: "latn", analyticsEnabled: true });
+  const base = { ...seedData(), demo: false };
+  win.localStorage.setItem("mizan.tenant.t-personal-1.v1", JSON.stringify(base));
+
+  render(
+    React.createElement(MizanRoot, {
+      skipSplash: true,
+      initialSession: makeTestSession({ isSuperAdmin: false }),
+    }),
+  );
+
+  // 1. Open Add Transaction form and type a draft amount ("321")
+  const addBtns = await screen.findAllByRole("button", { name: "إضافة" });
+  fireEvent.click(addBtns[0]);
+
+  const amountInput = await screen.findByLabelText("المبلغ");
+  fireEvent.change(amountInput, { target: { value: "321" } });
+  assert.equal(amountInput.value, "321");
+
+  // Simulate Realtime background merge arriving from another member while TxnForm is open!
+  applySyncedTenantData("t-personal-1", {
+    ...base,
+    txns: [
+      {
+        id: "tx-realtime-1",
+        kind: "income",
+        amount: 9000,
+        categoryId: "c-salary",
+        note: "تحويل فوري من شريك المساحة",
+        date: "2026-11-20",
+        walletId: "w-cash",
+        createdAt: Date.now(),
+      },
+    ],
+  });
+
+  // Open form MUST remain open with "321" untouched while store absorbed the remote transaction!
+  assert.equal(amountInput.value, "321");
+  assert.equal(useFinance.getState().txns.some((t) => t.id === "tx-realtime-1"), true);
+
+  // Unmount first tree, set PIN, and mount SecurityScreen to test AES-256-GCM toggle
+  cleanup();
+  const pinHash = await hashPin("4321");
+  writePinHash(pinHash);
+
+  // Re-mount cleanly at security route to test SecurityScreen AES-256-GCM toggle
+  const { SecurityScreen } = await viteServer.ssrLoadModule("/src/components/finance/security-screen.tsx");
+  const { MizanContext } = await viteServer.ssrLoadModule("/src/components/finance/context.tsx");
+
+  render(
+    React.createElement(
+      MizanContext.Provider,
+      {
+        value: {
+          tab: "more",
+          setTab: () => {},
+          month: "2026-11",
+          shiftMonth: () => {},
+          route: { name: "security" },
+          openPerson: () => {},
+          openDebt: () => {},
+          openReport: () => {},
+          openGoals: () => {},
+          openGoal: () => {},
+          openWallets: () => {},
+          openRecurring: () => {},
+          openNotifications: () => {},
+          openDrive: () => {},
+          openSecurity: () => {},
+          openZakat: () => {},
+          openTenant: () => {},
+          openAdmin: () => {},
+          openDebtsFiltered: () => {},
+          openLedgerFiltered: () => {},
+          debtFilter: "open",
+          setDebtFilter: () => {},
+          ledgerCategoryFilter: "",
+          setLedgerCategoryFilter: () => {},
+          back: () => {},
+          sheet: null,
+          openSheet: () => {},
+          closeSheet: () => {},
+          query: "",
+          setQuery: () => {},
+          frame: null,
+          pinHash,
+          setPinHash: () => {},
+        },
+      },
+      React.createElement(SecurityScreen),
+    ),
+  );
+
+  const strictBtn = await screen.findByRole("button", { name: /فائق الأمان برمز PIN فقط/ });
+  fireEvent.click(strictBtn);
+
+  const pinConfirm = await screen.findByLabelText("تأكيد رمز PIN للتشفير");
+  fireEvent.change(pinConfirm, { target: { value: "4321" } });
+  fireEvent.click(screen.getByRole("button", { name: "تأكيد وتطبيق" }));
+
+  await waitFor(() => {
+    const storedAfter = win.localStorage.getItem("mizan.tenant.t-personal-1.v1");
+    assert.equal(isEncryptedLedgerEnvelope(storedAfter), true);
+  });
+
+  resetLedgerCryptoForTests();
+});
+
+
 
 
 

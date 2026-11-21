@@ -33,6 +33,12 @@ import {
   shortDate,
   walletBalance,
 } from "@/lib/finance/logic";
+import {
+  getLedgerEncryptionMode,
+  requiresStrictPinColdUnlock,
+  unlockLedgerWithBiometric,
+  unlockLedgerWithPin,
+} from "@/lib/finance/ledger-crypto";
 import { pinLockoutRemainingMs, recordPinFailure, verifyPin, writePinHash } from "@/lib/finance/pin";
 import {
   exportMonthlyReportCsv,
@@ -41,7 +47,7 @@ import {
   shareMonthlyReportImage,
 } from "@/lib/finance/report-export";
 import { useSecuritySettings, verifyBiometricCredential } from "@/lib/finance/security";
-import { pickFinanceData, useFinance } from "@/lib/finance/store";
+import { pickFinanceData, refreshUnlockedFinanceFromVault, useFinance } from "@/lib/finance/store";
 
 const DONUT = ["var(--tint)", "var(--orange)", "var(--red)", "var(--green)", "var(--gray)"];
 
@@ -666,14 +672,26 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
   const [bioBusy, setBioBusy] = useState(false);
   const { ref: dotsRef, triggerShake } = usePinShake();
   const credentialId = security.biometricCredentialId;
-  const canBio = Boolean(security.biometricEnabled && credentialId);
+  const encMode = getLedgerEncryptionMode();
+  const strictPinRequired = requiresStrictPinColdUnlock();
+  const canBio = Boolean(security.biometricEnabled && credentialId && !strictPinRequired);
 
   async function tryBiometric() {
-    if (!credentialId || bioBusy) return;
+    if (!credentialId || bioBusy || strictPinRequired) return;
     setBioBusy(true);
     try {
       const ok = await verifyBiometricCredential(credentialId);
-      if (ok) onUnlock();
+      if (ok) {
+        if (encMode === "biometric") {
+          const vaultOk = await unlockLedgerWithBiometric();
+          if (!vaultOk) {
+            setLockMessage("أدخل رمز PIN لمرة واحدة لتنشيط مفتاح التشفير المحلي");
+            return;
+          }
+          refreshUnlockedFinanceFromVault();
+        }
+        onUnlock();
+      }
     } finally {
       setBioBusy(false);
     }
@@ -686,15 +704,24 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
   unlockRef.current = onUnlock;
   const autoPromptedRef = useRef(false);
   useEffect(() => {
-    if (!canBio || !credentialId || autoPromptedRef.current) return;
+    if (!canBio || !credentialId || strictPinRequired || autoPromptedRef.current) return;
     autoPromptedRef.current = true;
     const timer = setTimeout(() => {
-      void verifyBiometricCredential(credentialId).then((ok) => {
-        if (ok) unlockRef.current();
+      void verifyBiometricCredential(credentialId).then(async (ok) => {
+        if (!ok) return;
+        if (encMode === "biometric") {
+          const vaultOk = await unlockLedgerWithBiometric();
+          if (!vaultOk) {
+            setLockMessage("أدخل رمز PIN لمرة واحدة لتنشيط مفتاح التشفير المحلي");
+            return;
+          }
+          refreshUnlockedFinanceFromVault();
+        }
+        unlockRef.current();
       });
     }, 250);
     return () => clearTimeout(timer);
-  }, [canBio, credentialId]);
+  }, [canBio, credentialId, strictPinRequired, encMode]);
 
   async function press(key: string) {
     if (!key) return;
@@ -725,6 +752,12 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
     if (result.ok) {
       // Transparently upgrade legacy SHA-256 records to the salted KDF.
       if (result.upgraded) writePinHash(result.upgraded);
+      if (encMode !== "off") {
+        const vaultOk = await unlockLedgerWithPin(next);
+        if (vaultOk) {
+          refreshUnlockedFinanceFromVault();
+        }
+      }
       setLockMessage(null);
       onUnlock();
     } else {
@@ -739,7 +772,14 @@ export function LockScreen({ onUnlock }: { onUnlock: () => void }) {
   return (
     <div className="flex h-full flex-col items-center justify-center px-6 pb-10">
       <h1 className="text-title2 font-semibold">أدخل الرمز</h1>
-      <p className={cn("mt-2 text-sub", error ? "text-expense" : "text-label-2")}>{lockMessage ?? (error ? "رمز غير صحيح" : "ميزان مقفل على هذا الجهاز")}</p>
+      <p className={cn("mt-2 text-center text-sub", error ? "text-expense" : "text-label-2")}>
+        {lockMessage ??
+          (error
+            ? "رمز غير صحيح"
+            : strictPinRequired
+              ? "وضع التشفير الصارم AES-GCM نشط — أدخل رمز PIN لفك التشفير في الذاكرة"
+              : "ميزان مقفل على هذا الجهاز")}
+      </p>
       <div ref={dotsRef} className="mt-6 flex gap-3.5" dir="ltr">
         {[0, 1, 2, 3].map((i) => (
           <span

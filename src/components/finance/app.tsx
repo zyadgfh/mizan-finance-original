@@ -48,6 +48,7 @@ import { useI18n } from "@/lib/finance/i18n";
 import { markBootStart, recordBootMetrics } from "@/lib/finance/perf-metrics";
 import { consumeNativeSharedPayload } from "@/lib/finance/smart-capture";
 import { installMobileKeyboardScrollAssist } from "@/lib/mobile-safe";
+import { lockLedgerMemorySession } from "@/lib/finance/ledger-crypto";
 import { readPinHash, writePinHash } from "@/lib/finance/pin";
 import { applyDocumentLanguageAndDir } from "@/lib/finance/prefs";
 import {
@@ -437,6 +438,7 @@ function App({ initialRoute }: { initialRoute?: Route }) {
     canWrite,
     isSuperAdmin,
     isOnline,
+    realtimeConnected,
     syncStatus,
     pendingOpsCount,
     rejectedSyncItems,
@@ -573,11 +575,13 @@ function App({ initialRoute }: { initialRoute?: Route }) {
       if (document.visibilityState === "hidden") {
         if (sec.hideBalancesInRecents) setBackgroundMasked(true);
         if (sec.autoLockMinutes === 0 && unlocked) {
+          lockLedgerMemorySession();
           setUnlocked(false);
         }
       } else {
         setBackgroundMasked(false);
         if (unlocked && shouldAutoLock(lastActiveRef.current, Date.now(), sec.autoLockMinutes, true)) {
+          lockLedgerMemorySession();
           setUnlocked(false);
         }
       }
@@ -585,6 +589,7 @@ function App({ initialRoute }: { initialRoute?: Route }) {
     const interval = window.setInterval(() => {
       const sec = loadSecuritySettings();
       if (unlocked && sec.autoLockMinutes > 0 && shouldAutoLock(lastActiveRef.current, Date.now(), sec.autoLockMinutes, true)) {
+        lockLedgerMemorySession();
         setUnlocked(false);
       }
     }, 15_000);
@@ -833,6 +838,11 @@ function App({ initialRoute }: { initialRoute?: Route }) {
                           <span>· {lang === "en" ? "Offline" : "أوفلاين"}</span>
                         ) : pendingOpsCount > 0 ? (
                           <span>· {pendingOpsCount} {lang === "en" ? "queued" : "بانتظار المزامنة"}</span>
+                        ) : realtimeConnected ? (
+                          <span className="inline-flex items-center gap-1 text-green">
+                            <span className="h-1.5 w-1.5 rounded-full bg-green" />
+                            <span>{lang === "en" ? "Live" : "مباشر"}</span>
+                          </span>
                         ) : null}
                       </div>
                     </div>

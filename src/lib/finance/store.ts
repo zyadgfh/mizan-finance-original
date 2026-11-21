@@ -19,6 +19,10 @@ import {
 import { writePinHash } from "./pin.ts";
 import { recordBackupExport } from "./backup-reminder.ts";
 import { clearReceipts, exportAllReceipts, importAllReceipts } from "./receipts.ts";
+import {
+  readLedgerStorageItem,
+  writeLedgerStorageItem,
+} from "./ledger-crypto.ts";
 import { overwriteAndClearLocalKeys } from "./security.ts";
 import { seedData } from "./seed.ts";
 import { safeRandomUUID } from "../mobile-safe.ts";
@@ -1127,7 +1131,7 @@ function ensureStoreSubscription() {
   if (subscribed || typeof localStorage === "undefined") return;
   useFinance.subscribe((s) => {
     const snapshot = pickFinanceData(s);
-    localStorage.setItem(currentStorageKey(), JSON.stringify(snapshot));
+    writeLedgerStorageItem(currentStorageKey(), JSON.stringify(snapshot), localStorage);
     if (skipNextUpdatedAtBump) {
       skipNextUpdatedAtBump = false;
       lastCommittedSnapshot = snapshot;
@@ -1153,7 +1157,7 @@ export function hydrateFinance() {
   if (typeof localStorage === "undefined") return;
   ensureStoreSubscription();
   try {
-    const raw = localStorage.getItem(currentStorageKey());
+    const raw = readLedgerStorageItem(currentStorageKey(), localStorage);
     if (raw) {
       const parsed = asData(JSON.parse(raw));
       if (parsed) {
@@ -1170,7 +1174,7 @@ export function hydrateFinance() {
   }
   if (!localStorage.getItem(currentStorageKey())) {
     const initial = pickFinanceData(useFinance.getState());
-    localStorage.setItem(currentStorageKey(), JSON.stringify(initial));
+    writeLedgerStorageItem(currentStorageKey(), JSON.stringify(initial), localStorage);
     lastCommittedSnapshot = initial;
     setLocalUpdatedAt(0);
   }
@@ -1195,7 +1199,7 @@ export function hydrateTenantFinance(scope: FinanceTenantScope, fallbackData?: D
   const key = tenantDataKey(scope.tenantId);
   let loaded: Data | null = null;
   try {
-    const raw = localStorage.getItem(key);
+    const raw = readLedgerStorageItem(key, localStorage);
     if (raw) loaded = asData(JSON.parse(raw));
   } catch {
     loaded = null;
@@ -1206,11 +1210,27 @@ export function hydrateTenantFinance(scope: FinanceTenantScope, fallbackData?: D
   useFinance.setState(resolved);
   const picked = pickFinanceData(resolved);
   lastCommittedSnapshot = picked;
-  localStorage.setItem(key, JSON.stringify(picked));
+  writeLedgerStorageItem(key, JSON.stringify(picked), localStorage);
   if (!localStorage.getItem(tenantUpdatedAtKey(scope.tenantId))) {
     setLocalUpdatedAt(resolved.demo ? 0 : Date.now());
   }
   return resolved;
+}
+
+export function refreshUnlockedFinanceFromVault(): boolean {
+  if (typeof localStorage === "undefined") return false;
+  try {
+    const raw = readLedgerStorageItem(currentStorageKey(), localStorage);
+    if (!raw) return false;
+    const parsed = asData(JSON.parse(raw));
+    if (!parsed) return false;
+    skipNextUpdatedAtBump = true;
+    useFinance.setState(parsed);
+    lastCommittedSnapshot = pickFinanceData(parsed);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function applySyncedTenantData(tenantId: string, mergedData: Data): void {
@@ -1220,7 +1240,7 @@ export function applySyncedTenantData(tenantId: string, mergedData: Data): void 
   const picked = pickFinanceData(mergedData);
   lastCommittedSnapshot = picked;
   if (typeof localStorage !== "undefined") {
-    localStorage.setItem(tenantDataKey(tenantId), JSON.stringify(picked));
+    writeLedgerStorageItem(tenantDataKey(tenantId), JSON.stringify(picked), localStorage);
     setLocalUpdatedAt(Date.now());
   }
 }

@@ -9,6 +9,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Looper;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 import android.util.Base64;
 import android.view.View;
 import android.view.Window;
@@ -33,7 +35,12 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
 import java.util.Locale;
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
@@ -60,6 +67,31 @@ public class MainActivity extends BridgeActivity {
      * prompts would let a stale callback unlock the app later.
      */
     private volatile boolean biometricInFlight = false;
+    private volatile boolean biometricVerifiedSession = false;
+    private static final String VAULT_KEY_ALIAS = "mizan_ledger_vault_v1";
+
+    private SecretKey getOrCreateVaultMasterKey() throws Exception {
+        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        KeyStore.Entry existing = ks.getEntry(VAULT_KEY_ALIAS, null);
+        if (existing instanceof KeyStore.SecretKeyEntry) {
+            return ((KeyStore.SecretKeyEntry) existing).getSecretKey();
+        }
+        KeyGenerator kg = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES,
+            "AndroidKeyStore"
+        );
+        KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(
+            VAULT_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .build();
+        kg.init(spec);
+        return kg.generateKey();
+    }
 
     private boolean biometricSensorAvailable() {
         try {
@@ -108,6 +140,7 @@ public class MainActivity extends BridgeActivity {
                 new BiometricPrompt.AuthenticationCallback() {
                     @Override
                     public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) {
+                        biometricVerifiedSession = true;
                         settle(true, "ok");
                     }
 
@@ -561,6 +594,55 @@ public class MainActivity extends BridgeActivity {
                 });
                 return true;
             } catch (Throwable e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public String sealWithKeystore(String plainText) {
+            try {
+                if (!isTrustedWebOrigin()) return "";
+                if (plainText == null || plainText.isEmpty() || plainText.length() > 4096) return "";
+                SecretKey key = getOrCreateVaultMasterKey();
+                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                cipher.init(Cipher.ENCRYPT_MODE, key);
+                byte[] iv = cipher.getIV();
+                byte[] ct = cipher.doFinal(plainText.getBytes(StandardCharsets.UTF_8));
+                biometricVerifiedSession = true;
+                return Base64.encodeToString(iv, Base64.NO_WRAP)
+                    + "."
+                    + Base64.encodeToString(ct, Base64.NO_WRAP);
+            } catch (Throwable t) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public String unsealWithKeystore(String packedCipher) {
+            try {
+                if (!isTrustedWebOrigin() || !biometricVerifiedSession) return "";
+                if (packedCipher == null || !packedCipher.contains(".")) return "";
+                String[] parts = packedCipher.split("\\.", 2);
+                if (parts.length != 2) return "";
+                byte[] iv = Base64.decode(parts[0], Base64.NO_WRAP);
+                byte[] ct = Base64.decode(parts[1], Base64.NO_WRAP);
+                SecretKey key = getOrCreateVaultMasterKey();
+                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, iv));
+                byte[] pt = cipher.doFinal(ct);
+                return new String(pt, StandardCharsets.UTF_8);
+            } catch (Throwable t) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean clearVaultSession() {
+            try {
+                if (!isTrustedWebOrigin()) return false;
+                biometricVerifiedSession = false;
+                return true;
+            } catch (Throwable t) {
                 return false;
             }
         }
