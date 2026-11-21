@@ -946,6 +946,67 @@ test("AuthScreen allows Egyptian phone signup to proceed to payment step without
   assert.ok(proofPrompt);
 });
 
+test("Phase 2: Offline SmartCaptureSheet records InstaPay SMS and ZakatScreen computes net-worth Zakat", async () => {
+  const { MizanRoot } = await viteServer.ssrLoadModule("/src/components/finance/app.tsx");
+  const { useFinance } = await viteServer.ssrLoadModule("/src/lib/finance/store.ts");
+  const { seedData } = await viteServer.ssrLoadModule("/src/lib/finance/seed.ts");
+  const { updateUiPrefs } = await viteServer.ssrLoadModule("/src/lib/finance/prefs.ts");
+
+  updateUiPrefs({ language: "ar", numeralStyle: "latn", analyticsEnabled: true });
+  const base = seedData();
+  const seeded = {
+    ...base,
+    demo: false,
+    currency: "EGP",
+    wallets: [
+      { id: "w-insta", name: "إنستا باي", kind: "instapay", opening: 450000, createdAt: 1 },
+    ],
+    txns: [],
+    debts: [],
+    payments: [],
+  };
+  win.localStorage.setItem("mizan.tenant.t-personal-1.v1", JSON.stringify(seeded));
+
+  render(
+    React.createElement(MizanRoot, {
+      skipSplash: true,
+      initialSession: makeTestSession({ isSuperAdmin: false }),
+    }),
+  );
+
+  // Open Smart Capture from HomeScreen
+  const smartBtn = await screen.findByRole("button", { name: /التقاط ذكي للرسائل والإيصالات/ });
+  fireEvent.click(smartBtn);
+
+  const smsBox = await screen.findByLabelText(/نص الرسالة أو الجملة السريعة/);
+  fireEvent.change(smsBox, {
+    target: { value: "تم تحويل مبلغ 750 ج.م بنجاح عبر إنستاباي إلى كافيه" },
+  });
+
+  const recordBtn = await screen.findByRole("button", { name: /تسجيل الحركة فوراً بضغطة واحدة/ });
+  fireEvent.click(recordBtn);
+
+  await waitFor(() => {
+    const txns = useFinance.getState().txns;
+    assert.equal(txns.length, 1);
+    assert.equal(txns[0].amount, 750);
+    assert.equal(txns[0].walletId, "w-insta");
+  });
+
+  // Navigate to More -> Zakat Calculator
+  const moreTab = screen.getAllByRole("button", { name: "أكثر" })[0];
+  fireEvent.click(moreTab);
+
+  const zakatRow = await screen.findByText(/حاسبة زكاة المال الشرعية/);
+  fireEvent.click(zakatRow);
+
+  await waitFor(() => {
+    assert.ok(screen.getByText(/بلغ النصاب/));
+    assert.ok(screen.getByText(/صافي الوعاء الزكوي/));
+  });
+});
+
+
 
 
 

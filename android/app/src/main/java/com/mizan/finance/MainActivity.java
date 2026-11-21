@@ -28,8 +28,10 @@ import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.WebViewListener;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import org.json.JSONObject;
@@ -44,6 +46,7 @@ public class MainActivity extends BridgeActivity {
     );
 
     private volatile String pendingLaunchUrl = null;
+    private volatile String pendingSharedPayloadJson = null;
     /**
      * Last known WebView URL captured exclusively on the Android UI thread.
      * `@JavascriptInterface` methods run on the background `JavaBridge` thread,
@@ -185,6 +188,7 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
 
         captureIntentDeepLink(getIntent(), false);
+        captureSharedIntent(getIntent(), false);
 
         // Ensure Android 15/16 (targetSdk 36) edge-to-edge system bars, cutouts,
         // and IME soft keyboard never overlap WebView headers, tab bars, or inputs.
@@ -293,6 +297,7 @@ public class MainActivity extends BridgeActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         captureIntentDeepLink(intent, true);
+        captureSharedIntent(intent, true);
     }
 
     /** Only the app scheme and the production host may deliver deep links. */
@@ -327,7 +332,84 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    @SuppressWarnings("deprecation")
+    private void captureSharedIntent(final Intent intent, final boolean dispatchImmediately) {
+        if (intent == null) return;
+        if (!Intent.ACTION_SEND.equals(intent.getAction())) return;
+        final String mime = intent.getType() == null ? "" : intent.getType();
+        final CharSequence extraTextCs = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+        final String sharedText = extraTextCs == null
+            ? ""
+            : extraTextCs.toString().substring(0, Math.min(extraTextCs.length(), 8000)).trim();
+        final Uri streamUri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        if (sharedText.isEmpty() && streamUri == null) return;
+
+        new Thread(() -> {
+            try {
+                String imageDataUrl = null;
+                if (streamUri != null && mime.toLowerCase(Locale.ROOT).startsWith("image/")) {
+                    try (InputStream in = getContentResolver().openInputStream(streamUri)) {
+                        if (in != null) {
+                            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                            byte[] chunk = new byte[16384];
+                            int total = 0;
+                            int maxBytes = 5 * 1024 * 1024 + 512 * 1024; // 5.5 MB cap
+                            int read;
+                            while ((read = in.read(chunk)) != -1) {
+                                total += read;
+                                if (total > maxBytes) {
+                                    buffer = null;
+                                    break;
+                                }
+                                buffer.write(chunk, 0, read);
+                            }
+                            if (buffer != null && buffer.size() > 0) {
+                                String safeImgMime = mime.contains("png") ? "image/png" : "image/jpeg";
+                                imageDataUrl = "data:" + safeImgMime + ";base64,"
+                                    + Base64.encodeToString(buffer.toByteArray(), Base64.NO_WRAP);
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (sharedText.isEmpty() && imageDataUrl == null) return;
+                JSONObject payload = new JSONObject();
+                payload.put("text", sharedText);
+                payload.put("imageDataUrl", imageDataUrl == null ? JSONObject.NULL : imageDataUrl);
+                payload.put("mimeType", mime);
+                pendingSharedPayloadJson = payload.toString();
+
+                if (dispatchImmediately && getBridge() != null) {
+                    runOnUiThread(() -> {
+                        try {
+                            WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+                            if (webView != null) {
+                                webView.evaluateJavascript(
+                                    "window.dispatchEvent(new CustomEvent('mizan:share-target'));",
+                                    null
+                                );
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    });
+                }
+            } catch (Throwable ignored) {
+            }
+        }).start();
+    }
+
     private final class MizanNativeBridge {
+        @JavascriptInterface
+        public String consumeSharedPayload() {
+            try {
+                if (!isTrustedWebOrigin()) return "";
+                String payload = pendingSharedPayloadJson;
+                pendingSharedPayloadJson = null;
+                return payload == null ? "" : payload;
+            } catch (Throwable t) {
+                return "";
+            }
+        }
         /**
          * Android WebView does not implement WebAuthn, so the web layer cannot use
          * navigator.credentials here. These two methods expose the platform
