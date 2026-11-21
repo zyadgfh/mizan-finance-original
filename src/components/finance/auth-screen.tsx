@@ -75,7 +75,6 @@ export function AuthScreen({
   const [signupName, setSignupName] = useState("");
   const [signupIdentifier, setSignupIdentifier] = useState("");
   const [signupPassword, setSignupPassword] = useState("");
-  const [signupEmail, setSignupEmail] = useState("");
   const [bootstrapSecret, setBootstrapSecret] = useState("");
   const [needsVerification, setNeedsVerification] = useState(false);
   const [showSignupPass, setShowSignupPass] = useState(false);
@@ -224,14 +223,6 @@ export function AuthScreen({
       );
       return;
     }
-    if (normalized.kind === "phone" && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(signupEmail.trim())) {
-      toast.error(
-        isAr
-          ? "أدخل بريداً إلكترونياً صحيحاً لتأكيد الحساب (رقم الهاتف وحده لا يكفي)"
-          : "Enter a valid email address to verify the account",
-      );
-      return;
-    }
     setSignupStep("payment");
   };
 
@@ -275,7 +266,6 @@ export function AuthScreen({
 
     setBusy(true);
     try {
-      const normalizedSignup = normalizeSubscriberIdentity(signupIdentifier);
       const verification = await registerNewSubscriberWithPayment({
         identifier: signupIdentifier,
         password: signupPassword,
@@ -284,16 +274,15 @@ export function AuthScreen({
         paymentMethod: payMethod,
         senderHandle,
         proofDataUrl,
-        email: normalizedSignup?.kind === "phone" ? signupEmail.trim() : undefined,
       });
       toast.success(
         verification.verificationEmailSent
           ? isAr
-            ? "تم إرسال طلب الاشتراك! أرسلنا رابط تأكيد إلى بريدك — أكّده ثم سجّل الدخول."
-            : "Registration submitted! Confirm the email we sent, then sign in."
+            ? "تم إرسال طلب الاشتراك! سيتفعّل حسابك فور مراجعة إيصال التحويل أو تأكيد الرابط المرسل لبريدك."
+            : "Registration submitted! Your account activates once payment is approved or email confirmed."
           : isAr
-            ? "تم إرسال طلب الاشتراك! أكّد بريدك الإلكتروني ثم سجّل الدخول."
-            : "Registration submitted! Verify your email, then sign in.",
+            ? "تم إرسال طلب الاشتراك وإيصال التحويل بنجاح! سيتفعّل دخولك فور مراجعة الإدارة للتحويل."
+            : "Registration & transfer receipt submitted! Your login activates once approved.",
       );
       setIdentifier(signupIdentifier);
       setView("signin");
@@ -561,17 +550,19 @@ export function AuthScreen({
               <div className="p-3 rounded-2xl bg-[var(--tint-soft)] border border-[var(--tint)] space-y-2">
                 <p className="text-[11px] font-semibold text-[var(--tint)] leading-relaxed">
                   {isAr
-                    ? "حسابك لم يُفعّل بعد: يجب تأكيد بريدك الإلكتروني أولاً."
-                    : "Your account is not active yet — confirm your email first."}
+                    ? "حسابك وطلب اشتراكك قيد التفعيل الآن — سيتم فتح الدخول تلقائياً فور تأكيد إيصال التحويل من إدارة المنصة."
+                    : "Your account is awaiting activation — sign-in unlocks automatically once your transfer receipt is approved."}
                 </p>
-                <button
-                  type="button"
-                  onClick={() => void resendVerification()}
-                  disabled={busy}
-                  className="h-9 px-3.5 rounded-xl bg-[var(--tint)] text-white text-[12px] font-semibold disabled:opacity-60"
-                >
-                  {isAr ? "إعادة إرسال رابط التأكيد" : "Resend verification email"}
-                </button>
+                {normalizeSubscriberIdentity(identifier)?.kind === "email" && (
+                  <button
+                    type="button"
+                    onClick={() => void resendVerification()}
+                    disabled={busy}
+                    className="h-9 px-3.5 rounded-xl bg-[var(--tint)] text-white text-[12px] font-semibold disabled:opacity-60"
+                  >
+                    {isAr ? "إعادة إرسال رابط التأكيد للبريد" : "Resend verification email"}
+                  </button>
+                )}
               </div>
             )}
 
@@ -689,29 +680,6 @@ export function AuthScreen({
                     />
                   </div>
                 </div>
-
-                {normalizeSubscriberIdentity(signupIdentifier)?.kind === "phone" && (
-                  <div className="space-y-1">
-                    <label className="text-[12px] font-semibold text-[var(--label-2)] block">
-                      {isAr ? "البريد الإلكتروني لتأكيد الحساب *" : "Email for account verification *"}
-                    </label>
-                    <input
-                      type="email"
-                      dir="ltr"
-                      autoComplete="email"
-                      value={signupEmail}
-                      onChange={(e) => setSignupEmail(e.target.value)}
-                      placeholder="name@mail.com"
-                      className="w-full h-11 px-3.5 rounded-xl bg-[var(--fill)] text-[14px] outline-none focus:ring-2 ring-[var(--tint)]"
-                      required
-                    />
-                    <p className="text-[10px] text-[var(--label-3)]">
-                      {isAr
-                        ? "رقم الهاتف لا يكفي وحده: نرسل رابط تأكيد إلى هذا البريد قبل تفعيل الدخول."
-                        : "A phone number alone cannot be verified — we email a confirmation link."}
-                    </p>
-                  </div>
-                )}
 
                 <div className="space-y-1">
                   <label className="text-[12px] font-semibold text-[var(--label-2)] block">

@@ -9,6 +9,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Looper;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 import android.util.Base64;
 import android.view.View;
 import android.view.Window;
@@ -28,10 +30,17 @@ import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.WebViewListener;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
 import java.util.Locale;
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 import org.json.JSONObject;
 
 public class MainActivity extends BridgeActivity {
@@ -44,6 +53,7 @@ public class MainActivity extends BridgeActivity {
     );
 
     private volatile String pendingLaunchUrl = null;
+    private volatile String pendingSharedPayloadJson = null;
     /**
      * Last known WebView URL captured exclusively on the Android UI thread.
      * `@JavascriptInterface` methods run on the background `JavaBridge` thread,
@@ -57,6 +67,31 @@ public class MainActivity extends BridgeActivity {
      * prompts would let a stale callback unlock the app later.
      */
     private volatile boolean biometricInFlight = false;
+    private volatile boolean biometricVerifiedSession = false;
+    private static final String VAULT_KEY_ALIAS = "mizan_ledger_vault_v1";
+
+    private SecretKey getOrCreateVaultMasterKey() throws Exception {
+        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        KeyStore.Entry existing = ks.getEntry(VAULT_KEY_ALIAS, null);
+        if (existing instanceof KeyStore.SecretKeyEntry) {
+            return ((KeyStore.SecretKeyEntry) existing).getSecretKey();
+        }
+        KeyGenerator kg = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES,
+            "AndroidKeyStore"
+        );
+        KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(
+            VAULT_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .build();
+        kg.init(spec);
+        return kg.generateKey();
+    }
 
     private boolean biometricSensorAvailable() {
         try {
@@ -105,6 +140,7 @@ public class MainActivity extends BridgeActivity {
                 new BiometricPrompt.AuthenticationCallback() {
                     @Override
                     public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) {
+                        biometricVerifiedSession = true;
                         settle(true, "ok");
                     }
 
@@ -185,6 +221,7 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
 
         captureIntentDeepLink(getIntent(), false);
+        captureSharedIntent(getIntent(), false);
 
         // Ensure Android 15/16 (targetSdk 36) edge-to-edge system bars, cutouts,
         // and IME soft keyboard never overlap WebView headers, tab bars, or inputs.
@@ -293,6 +330,7 @@ public class MainActivity extends BridgeActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         captureIntentDeepLink(intent, true);
+        captureSharedIntent(intent, true);
     }
 
     /** Only the app scheme and the production host may deliver deep links. */
@@ -327,7 +365,84 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    @SuppressWarnings("deprecation")
+    private void captureSharedIntent(final Intent intent, final boolean dispatchImmediately) {
+        if (intent == null) return;
+        if (!Intent.ACTION_SEND.equals(intent.getAction())) return;
+        final String mime = intent.getType() == null ? "" : intent.getType();
+        final CharSequence extraTextCs = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+        final String sharedText = extraTextCs == null
+            ? ""
+            : extraTextCs.toString().substring(0, Math.min(extraTextCs.length(), 8000)).trim();
+        final Uri streamUri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        if (sharedText.isEmpty() && streamUri == null) return;
+
+        new Thread(() -> {
+            try {
+                String imageDataUrl = null;
+                if (streamUri != null && mime.toLowerCase(Locale.ROOT).startsWith("image/")) {
+                    try (InputStream in = getContentResolver().openInputStream(streamUri)) {
+                        if (in != null) {
+                            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                            byte[] chunk = new byte[16384];
+                            int total = 0;
+                            int maxBytes = 5 * 1024 * 1024 + 512 * 1024; // 5.5 MB cap
+                            int read;
+                            while ((read = in.read(chunk)) != -1) {
+                                total += read;
+                                if (total > maxBytes) {
+                                    buffer = null;
+                                    break;
+                                }
+                                buffer.write(chunk, 0, read);
+                            }
+                            if (buffer != null && buffer.size() > 0) {
+                                String safeImgMime = mime.contains("png") ? "image/png" : "image/jpeg";
+                                imageDataUrl = "data:" + safeImgMime + ";base64,"
+                                    + Base64.encodeToString(buffer.toByteArray(), Base64.NO_WRAP);
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (sharedText.isEmpty() && imageDataUrl == null) return;
+                JSONObject payload = new JSONObject();
+                payload.put("text", sharedText);
+                payload.put("imageDataUrl", imageDataUrl == null ? JSONObject.NULL : imageDataUrl);
+                payload.put("mimeType", mime);
+                pendingSharedPayloadJson = payload.toString();
+
+                if (dispatchImmediately && getBridge() != null) {
+                    runOnUiThread(() -> {
+                        try {
+                            WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+                            if (webView != null) {
+                                webView.evaluateJavascript(
+                                    "window.dispatchEvent(new CustomEvent('mizan:share-target'));",
+                                    null
+                                );
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    });
+                }
+            } catch (Throwable ignored) {
+            }
+        }).start();
+    }
+
     private final class MizanNativeBridge {
+        @JavascriptInterface
+        public String consumeSharedPayload() {
+            try {
+                if (!isTrustedWebOrigin()) return "";
+                String payload = pendingSharedPayloadJson;
+                pendingSharedPayloadJson = null;
+                return payload == null ? "" : payload;
+            } catch (Throwable t) {
+                return "";
+            }
+        }
         /**
          * Android WebView does not implement WebAuthn, so the web layer cannot use
          * navigator.credentials here. These two methods expose the platform
@@ -398,6 +513,48 @@ public class MainActivity extends BridgeActivity {
         }
 
         @JavascriptInterface
+        public String getAppVersion() {
+            try {
+                if (!isTrustedWebOrigin()) return "";
+                android.content.pm.PackageInfo info =
+                    getPackageManager().getPackageInfo(getPackageName(), 0);
+                return info != null && info.versionName != null ? info.versionName : "";
+            } catch (Throwable t) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean openExternalUrl(String rawUrl) {
+            try {
+                if (!isTrustedWebOrigin()) return false;
+                if (rawUrl == null || rawUrl.trim().isEmpty()) return false;
+                final Uri uri = Uri.parse(rawUrl.trim());
+                if (!"https".equalsIgnoreCase(uri.getScheme())) return false;
+                String host = uri.getHost() != null ? uri.getHost().toLowerCase(Locale.ROOT) : "";
+                String path = uri.getPath() != null ? uri.getPath() : "";
+                boolean allowedGithubRelease =
+                    "github.com".equals(host)
+                        && path.startsWith("/zyadgfh/mizan-finance-original/");
+                boolean allowedProdWeb = "mizan-finance-rho.vercel.app".equals(host);
+                if (!allowedGithubRelease && !allowedProdWeb) return false;
+
+                runOnUiThread(() -> {
+                    try {
+                        Intent viewIntent = new Intent(Intent.ACTION_VIEW, uri);
+                        viewIntent.addCategory(Intent.CATEGORY_BROWSABLE);
+                        viewIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(viewIntent);
+                    } catch (Throwable ignored) {
+                    }
+                });
+                return true;
+            } catch (Throwable t) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
         public boolean shareFile(String filename, String mimeType, String content) {
             try {
                 if (!isTrustedWebOrigin()) return false;
@@ -437,6 +594,55 @@ public class MainActivity extends BridgeActivity {
                 });
                 return true;
             } catch (Throwable e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public String sealWithKeystore(String plainText) {
+            try {
+                if (!isTrustedWebOrigin()) return "";
+                if (plainText == null || plainText.isEmpty() || plainText.length() > 4096) return "";
+                SecretKey key = getOrCreateVaultMasterKey();
+                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                cipher.init(Cipher.ENCRYPT_MODE, key);
+                byte[] iv = cipher.getIV();
+                byte[] ct = cipher.doFinal(plainText.getBytes(StandardCharsets.UTF_8));
+                biometricVerifiedSession = true;
+                return Base64.encodeToString(iv, Base64.NO_WRAP)
+                    + "."
+                    + Base64.encodeToString(ct, Base64.NO_WRAP);
+            } catch (Throwable t) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public String unsealWithKeystore(String packedCipher) {
+            try {
+                if (!isTrustedWebOrigin() || !biometricVerifiedSession) return "";
+                if (packedCipher == null || !packedCipher.contains(".")) return "";
+                String[] parts = packedCipher.split("\\.", 2);
+                if (parts.length != 2) return "";
+                byte[] iv = Base64.decode(parts[0], Base64.NO_WRAP);
+                byte[] ct = Base64.decode(parts[1], Base64.NO_WRAP);
+                SecretKey key = getOrCreateVaultMasterKey();
+                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, iv));
+                byte[] pt = cipher.doFinal(ct);
+                return new String(pt, StandardCharsets.UTF_8);
+            } catch (Throwable t) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean clearVaultSession() {
+            try {
+                if (!isTrustedWebOrigin()) return false;
+                biometricVerifiedSession = false;
+                return true;
+            } catch (Throwable t) {
                 return false;
             }
         }

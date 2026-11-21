@@ -7,4 +7,8 @@ dist/
 .vercel/
 android/local.properties
 *.apk
+*.jks
+*.keystore
+*.p12
+.keystore-secrets*
 .DS_Store

@@ -28,6 +28,7 @@ import {
   type SheetState,
   type Tab,
 } from "@/components/finance/context";
+import { ApkUpdateBanner } from "@/components/finance/apk-update-banner";
 import { ErrorBoundary } from "@/components/finance/error-boundary";
 import { MotionScreen } from "@/components/finance/gsap-motion";
 import {
@@ -45,7 +46,9 @@ import { cn } from "@/lib/cn";
 import { formatNumber, shiftMonthKey, currentMonth, debtTotals } from "@/lib/finance/logic";
 import { useI18n } from "@/lib/finance/i18n";
 import { markBootStart, recordBootMetrics } from "@/lib/finance/perf-metrics";
+import { consumeNativeSharedPayload } from "@/lib/finance/smart-capture";
 import { installMobileKeyboardScrollAssist } from "@/lib/mobile-safe";
+import { lockLedgerMemorySession } from "@/lib/finance/ledger-crypto";
 import { readPinHash, writePinHash } from "@/lib/finance/pin";
 import { applyDocumentLanguageAndDir } from "@/lib/finance/prefs";
 import {
@@ -116,6 +119,12 @@ const NotificationsScreen = lazy(() =>
 const SecurityScreen = lazy(() =>
   import("@/components/finance/security-screen").then((m) => ({ default: m.SecurityScreen })),
 );
+const ZakatScreen = lazy(() =>
+  import("@/components/finance/zakat-screen").then((m) => ({ default: m.ZakatScreen })),
+);
+const SmartCaptureSheet = lazy(() =>
+  import("@/components/finance/smart-capture-sheet").then((m) => ({ default: m.SmartCaptureSheet })),
+);
 
 const TxnForm = lazy(() => import("@/components/finance/forms").then((m) => ({ default: m.TxnForm })));
 const PersonForm = lazy(() => import("@/components/finance/forms").then((m) => ({ default: m.PersonForm })));
@@ -175,6 +184,7 @@ export function MizanRoot({
         requestedInviteCode={requestedInviteCode}
         initialSession={initialSession}
       >
+        <ApkUpdateBanner />
         <TenantAuthGate
           skipSplash={skipSplash}
           requestedInviteCode={requestedInviteCode}
@@ -428,6 +438,7 @@ function App({ initialRoute }: { initialRoute?: Route }) {
     canWrite,
     isSuperAdmin,
     isOnline,
+    realtimeConnected,
     syncStatus,
     pendingOpsCount,
     rejectedSyncItems,
@@ -564,11 +575,13 @@ function App({ initialRoute }: { initialRoute?: Route }) {
       if (document.visibilityState === "hidden") {
         if (sec.hideBalancesInRecents) setBackgroundMasked(true);
         if (sec.autoLockMinutes === 0 && unlocked) {
+          lockLedgerMemorySession();
           setUnlocked(false);
         }
       } else {
         setBackgroundMasked(false);
         if (unlocked && shouldAutoLock(lastActiveRef.current, Date.now(), sec.autoLockMinutes, true)) {
+          lockLedgerMemorySession();
           setUnlocked(false);
         }
       }
@@ -576,6 +589,7 @@ function App({ initialRoute }: { initialRoute?: Route }) {
     const interval = window.setInterval(() => {
       const sec = loadSecuritySettings();
       if (unlocked && sec.autoLockMinutes > 0 && shouldAutoLock(lastActiveRef.current, Date.now(), sec.autoLockMinutes, true)) {
+        lockLedgerMemorySession();
         setUnlocked(false);
       }
     }, 15_000);
@@ -712,6 +726,30 @@ function App({ initialRoute }: { initialRoute?: Route }) {
     setSheet(next);
   }
 
+  // Consume Android ACTION_SEND shared SMS / receipt images on launch or resume
+  useEffect(() => {
+    const pullShared = () => {
+      if (!canWrite) return;
+      const shared = consumeNativeSharedPayload();
+      if (!shared) return;
+      setSheet({
+        kind: "smart-capture",
+        initialText: shared.text,
+        initialImageDataUrl: shared.imageDataUrl,
+      });
+    };
+    pullShared();
+    window.addEventListener("mizan:share-target", pullShared);
+    const onVis = () => {
+      if (document.visibilityState === "visible") pullShared();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("mizan:share-target", pullShared);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [canWrite]);
+
   const showAdd = route.name === "main" && tab !== "more" && canWrite;
   const locked = Boolean(pinHash) && !unlocked;
   const BackChevron = isRtl ? ChevronRight : ChevronLeft;
@@ -734,6 +772,7 @@ function App({ initialRoute }: { initialRoute?: Route }) {
         openNotifications: () => pushRoute({ name: "notifications" }),
         openDrive: () => pushRoute({ name: "drive" }),
         openSecurity: () => pushRoute({ name: "security" }),
+        openZakat: () => pushRoute({ name: "zakat" }),
         openTenant: () => pushRoute({ name: "tenant" }),
         openAdmin: () => pushRoute({ name: "admin" }),
         openDebtsFiltered,
@@ -799,6 +838,11 @@ function App({ initialRoute }: { initialRoute?: Route }) {
                           <span>· {lang === "en" ? "Offline" : "أوفلاين"}</span>
                         ) : pendingOpsCount > 0 ? (
                           <span>· {pendingOpsCount} {lang === "en" ? "queued" : "بانتظار المزامنة"}</span>
+                        ) : realtimeConnected ? (
+                          <span className="inline-flex items-center gap-1 text-green">
+                            <span className="h-1.5 w-1.5 rounded-full bg-green" />
+                            <span>{lang === "en" ? "Live" : "مباشر"}</span>
+                          </span>
                         ) : null}
                       </div>
                     </div>
@@ -1065,6 +1109,8 @@ function App({ initialRoute }: { initialRoute?: Route }) {
                         <DriveSyncScreen />
                       ) : route.name === "security" ? (
                         <SecurityScreen />
+                      ) : route.name === "zakat" ? (
+                        <ZakatScreen />
                       ) : route.name === "tenant" ? (
                         <TenantSettingsScreen />
                       ) : route.name === "admin" ? (
@@ -1143,9 +1189,16 @@ function App({ initialRoute }: { initialRoute?: Route }) {
               ) : null}
               {sheet?.kind === "txn" ? (
                 <TxnForm
-                  key={`${sheet.id ?? "new-tx"}-${sheet.prefill?.kind ?? "none"}-${sheet.prefill?.note ?? ""}`}
+                  key={`${sheet.id ?? sheet.prefill?.draftId ?? "new-tx"}-${sheet.prefill?.kind ?? "none"}-${sheet.prefill?.note ?? ""}`}
                   id={sheet.id}
                   prefill={sheet.prefill}
+                />
+              ) : null}
+              {sheet?.kind === "smart-capture" ? (
+                <SmartCaptureSheet
+                  key={`sc-${sheet.initialText ?? ""}-${sheet.initialImageDataUrl ? "img" : "noimg"}`}
+                  initialText={sheet.initialText}
+                  initialImageDataUrl={sheet.initialImageDataUrl}
                 />
               ) : null}
               {sheet?.kind === "person" ? <PersonForm key={sheet.id ?? "new-person"} id={sheet.id} /> : null}
@@ -1194,6 +1247,7 @@ function heading(
   if (route.name === "notifications") return lang === "en" ? "Notifications & Tasks" : "الإشعارات والمهام";
   if (route.name === "drive") return lang === "en" ? "Google Drive Sync" : "مزامنة Google Drive";
   if (route.name === "security") return lang === "en" ? "Security & Privacy" : "الأمان والخصوصية";
+  if (route.name === "zakat") return lang === "en" ? "Zakat Calculator" : "حاسبة زكاة المال";
   if (route.name === "tenant") return lang === "en" ? "Workspace & Members" : "المساحة والأعضاء";
   if (route.name === "admin") return lang === "en" ? "Platform Admin" : "لوحة المنصة";
   if (tab === "home") return lang === "en" ? "Today" : "اليوم";

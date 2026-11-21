@@ -16,10 +16,13 @@ export type Route =
   | { name: "notifications" }
   | { name: "drive" }
   | { name: "security" }
+  | { name: "zakat" }
   | { name: "tenant" }
   | { name: "admin" };
 
 export type TxPrefill = {
+  draftId?: string;
+  receiptAttached?: boolean;
   kind?: TxKind;
   amount?: number;
   categoryId?: string;
@@ -31,6 +34,7 @@ export type TxPrefill = {
 export type SheetState =
   | null
   | { kind: "txn"; id?: string; prefill?: TxPrefill }
+  | { kind: "smart-capture"; initialText?: string; initialImageDataUrl?: string | null }
   | { kind: "debt"; id?: string }
   | { kind: "pay"; debtId: string }
   | { kind: "person"; id?: string }
@@ -63,6 +67,7 @@ export type MizanUI = {
   openNotifications: () => void;
   openDrive: () => void;
   openSecurity: () => void;
+  openZakat: () => void;
   openTenant: () => void;
   openAdmin: () => void;
   openDebtsFiltered: (filter: DebtTabFilter) => void;

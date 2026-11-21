@@ -103,7 +103,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
       ? 1
       : existing?.exchangeRate ?? effectiveExchangeRate(initialCurrency, accountCurrency, exchangeRates);
 
-  const [draftId] = useState(() => existing?.id ?? safeRandomUUID());
+  const [draftId] = useState(() => existing?.id ?? prefill?.draftId ?? safeRandomUUID());
   const [kind, setKind] = useState<TxKind>(initialKind);
   const [amount, setAmount] = useState(
     existing ? String(existing.amount) : prefill?.amount ? String(prefill.amount) : "",
@@ -116,7 +116,7 @@ export function TxnForm({ id, prefill }: { id?: string; prefill?: TxPrefill }) {
   const [note, setNote] = useState(existing?.note ?? prefill?.note ?? "");
   const [personId, setPersonId] = useState(existing?.personId ?? prefill?.personId ?? "");
   const [walletId, setWalletId] = useState(initialWallet);
-  const [receiptOn, setReceiptOn] = useState(Boolean(existing?.receiptId));
+  const [receiptOn, setReceiptOn] = useState(Boolean(existing?.receiptId || prefill?.receiptAttached));
   const [preview, setPreview] = useState("");
 
   const cats = categories.filter((c) => c.kind === kind);

@@ -8,11 +8,13 @@ import {
   Eye,
   EyeOff,
   FileSpreadsheet,
+  FileText,
   Globe,
   LogOut,
   Palette,
   Pencil,
   Plus,
+  Scale,
   Search,
   Shield,
   Sparkles,
@@ -38,6 +40,8 @@ import {
 import { clearErrorLogs, loadErrorLogs } from "@/lib/finance/error-log";
 import { useBackupReminderStatus } from "@/lib/finance/backup-reminder";
 import { useI18n } from "@/lib/finance/i18n";
+import { getNativeAppVersion, isNativeMobileApp } from "@/lib/mobile-safe";
+import { triggerManualApkUpdateCheck } from "@/lib/update/apk-updater";
 import {
   budgetAlerts,
   cashPosition,
@@ -196,12 +200,23 @@ export function HomeScreen() {
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => openSheet({ kind: "design" })}
-              aria-label={lang === "en" ? "Apple Themes & Card Names" : "تصميمات Apple وتعديل البطاقات"}
+              onClick={() => openSheet({ kind: "smart-capture" })}
+              aria-label={lang === "en" ? "Offline Smart Capture" : "التقاط ذكي للرسائل والإيصالات"}
               className="inline-flex min-h-11 items-center gap-1.5 rounded-pill bg-[var(--tint-soft)] px-3 text-caption font-semibold text-tint active:opacity-80"
             >
-              <Palette size={16} strokeWidth={2.1} />
+              <Sparkles size={16} strokeWidth={2.1} />
               <span className="hidden xs:inline sm:inline">
+                {lang === "en" ? "Smart" : "التقاط ذكي"}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => openSheet({ kind: "design" })}
+              aria-label={lang === "en" ? "Apple Themes & Card Names" : "تصميمات Apple وتعديل البطاقات"}
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-pill bg-fill px-3 text-caption font-semibold text-label active:opacity-80"
+            >
+              <Palette size={16} strokeWidth={2.1} />
+              <span className="hidden sm:inline">
                 {lang === "en" ? "Themes" : "التصميمات"}
               </span>
             </button>
@@ -1076,6 +1091,38 @@ export function PersonScreen({ id }: { id: string }) {
       </div>
       <Section>
         <Group>
+          <Row
+            leading={
+              <span className="icon-tile" style={{ background: "var(--tint)" }}>
+                <FileText size={16} />
+              </span>
+            }
+            title="تصدير كشف حساب PDF رسمي"
+            sub="وثيقة مفصّلة بالديون وسجل الدفعات والصافي"
+            chevron
+            onClick={() => {
+              toast("جارٍ إعداد كشف الحساب الرسمي PDF…");
+              void import("@/lib/finance/person-statement-pdf")
+                .then(({ exportPersonStatementPdf }) =>
+                  exportPersonStatementPdf(
+                    {
+                      people: [person],
+                      debts,
+                      payments,
+                      currency,
+                    },
+                    person.id,
+                  ),
+                )
+                .then((ok) => {
+                  if (ok) toast.success("تم تجهيز كشف الحساب PDF بنجاح");
+                  else toast.error("تعذّر إنشاء ملف PDF");
+                })
+                .catch(() => {
+                  toast.error("تعذّر إنشاء ملف PDF");
+                });
+            }}
+          />
           {person.phone ? (
             <Row title="اتصال" sub={person.phone} onClick={() => window.open(`tel:${person.phone}`)} chevron />
           ) : null}
@@ -1330,6 +1377,7 @@ export function MoreScreen() {
     openNotifications,
     openDrive,
     openSecurity,
+    openZakat,
     openTenant,
     openAdmin,
     pinHash,
@@ -1541,6 +1589,17 @@ export function MoreScreen() {
       <Section title={t("toolsSection")}>
         <Group>
           <Row title={t("monthReport")} sub={lang === "en" ? "6-month trends & PDF / Excel / PNG" : "مقارنة 6 أشهر وتصدير PDF / Excel / PNG"} chevron onClick={openReport} />
+          <Row
+            title={lang === "en" ? "Zakat al-Mal Calculator" : "حاسبة زكاة المال الشرعية"}
+            sub={lang === "en" ? "Comprehensive net worth vs 85g 24K gold Nisab (2.5%)" : "صافي الثروة والديون مقارنةً بنصاب ٨٥ جرام ذهب عيار ٢٤"}
+            leading={
+              <span className="icon-tile" style={{ background: "var(--green)" }}>
+                <Scale size={16} />
+              </span>
+            }
+            chevron
+            onClick={openZakat}
+          />
           <Row title={lang === "en" ? "Wallets & Transfers" : "المحافظ والتحويل"} chevron onClick={openWallets} />
           <Row title={lang === "en" ? "Savings Goals" : "أهداف الادخار"} chevron onClick={openGoals} />
           <Row title={lang === "en" ? "Recurring Entries" : "حركات متكررة"} chevron onClick={openRecurring} />
@@ -1958,6 +2017,28 @@ export function MoreScreen() {
 
       <Section title={t("perfAndErrors")}>
         <Group sep="icon">
+          {isNativeMobileApp() ? (
+            <Row
+              leading={
+                <span className="icon-tile" style={{ background: "var(--tint)" }}>
+                  <Sparkles size={16} />
+                </span>
+              }
+              title={lang === "en" ? "App Version & Updates" : "إصدار التطبيق والتحديثات"}
+              sub={
+                getNativeAppVersion()
+                  ? `v${getNativeAppVersion()}`
+                  : lang === "en"
+                    ? "Android Native APK"
+                    : "نسخة أندرويد الأصلية"
+              }
+              trailing={
+                <PillButton tone="plain" onClick={() => triggerManualApkUpdateCheck()}>
+                  {lang === "en" ? "Check" : "فحص التحديثات"}
+                </PillButton>
+              }
+            />
+          ) : null}
           <Row
             leading={
               <span className="icon-tile" style={{ background: "var(--gray)" }}>

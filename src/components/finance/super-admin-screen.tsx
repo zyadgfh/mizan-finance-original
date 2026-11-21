@@ -381,9 +381,9 @@ export function SuperAdminScreen() {
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newEmailOrPhone.trim() || newPassword.length < 6) {
+    if (!newEmailOrPhone.trim() || newPassword.length < 8) {
       toast.error(
-        isAr ? "أدخل بريداً أو رقم هاتف صحيح وكلمة مرور من 6 أحرف" : "Enter valid email/phone and 6+ char password",
+        isAr ? "أدخل بريداً أو رقم هاتف صحيح وكلمة مرور من 8 أحرف" : "Enter valid email/phone and 8+ char password",
       );
       return;
     }
@@ -444,8 +444,8 @@ export function SuperAdminScreen() {
   const confirmResetUserPassword = async () => {
     if (!adminDialog || adminDialog.kind !== "reset-password") return;
     const { user: u, nextPass } = adminDialog;
-    if (!nextPass || nextPass.trim().length < 6) {
-      toast.error(isAr ? "كلمة المرور 6 أحرف على الأقل" : "At least 6 characters");
+    if (!nextPass || nextPass.trim().length < 8) {
+      toast.error(isAr ? "كلمة المرور 8 أحرف على الأقل" : "At least 8 characters");
       return;
     }
     setBusy(true);
@@ -454,6 +454,21 @@ export function SuperAdminScreen() {
       setCreatedCreds({ email: u.email, password: nextPass.trim(), displayName: u.displayName });
       setAdminDialog(null);
       toast.success(isAr ? "تم تحديث كلمة المرور" : "Password updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConfirmUserLogin = async (u: AdminManagedUser) => {
+    setBusy(true);
+    try {
+      await adminUpdateUserAccount({ userId: u.id, emailConfirm: true });
+      await load();
+      toast.success(
+        isAr ? `تم تفعيل تسجيل الدخول للحساب (${u.email})` : `Sign-in activated for ${u.email}`,
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed");
     } finally {
@@ -1349,6 +1364,11 @@ export function SuperAdminScreen() {
                         {isAr ? "محظور الدخول" : "Banned"}
                       </span>
                     )}
+                    {u.emailVerified === false && (
+                      <span className="px-2 py-0.5 rounded-full bg-[var(--orange-soft)] text-[var(--orange)] text-[10px] font-bold">
+                        {isAr ? "بانتظار التفعيل" : "Unconfirmed"}
+                      </span>
+                    )}
                   </div>
                   <div className="text-[12px] text-[var(--label-3)] truncate font-mono" dir="ltr">
                     {u.email}
@@ -1356,6 +1376,17 @@ export function SuperAdminScreen() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1.5">
+                  {u.emailVerified === false && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void handleConfirmUserLogin(u)}
+                      className="h-8 px-2.5 rounded-lg bg-[var(--green-soft)] text-[var(--green)] text-[11px] font-semibold flex items-center gap-1 disabled:opacity-60"
+                    >
+                      <Check className="w-3 h-3" />
+                      {isAr ? "تفعيل الدخول" : "Activate Login"}
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => handleResetUserPassword(u)}

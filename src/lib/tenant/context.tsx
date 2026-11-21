@@ -12,6 +12,10 @@ import {
 import { toast } from "sonner";
 import { defaultExchangeRatesFor, defaultWallets } from "../finance/logic.ts";
 import {
+  getLedgerEncryptionMode,
+  hasUnlockedLedgerKey,
+} from "../finance/ledger-crypto.ts";
+import {
   configureReceiptSyncScope,
   flushPendingReceiptSync,
   purgeAllReceiptsOnSignOut,
@@ -109,6 +113,7 @@ export type TenantContextValue = {
   subscriptionBlockReason: SubscriptionBlockReason | null;
   canWrite: boolean;
   isOnline: boolean;
+  realtimeConnected: boolean;
   syncStatus: SyncStatus;
   pendingOpsCount: number;
   rejectedSyncItems: SyncRejectedItem[];
@@ -204,6 +209,7 @@ export function TenantProvider({
   const [isOnline, setIsOnline] = useState(
     typeof navigator !== "undefined" ? navigator.onLine !== false : true,
   );
+  const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [pendingOpsCount, setPendingOpsCount] = useState(0);
   const [rejectedSyncItems, setRejectedSyncItems] = useState<SyncRejectedItem[]>([]);
@@ -215,6 +221,8 @@ export function TenantProvider({
 
   const syncTimerRef = useRef<number | null>(null);
   const syncingRef = useRef(false);
+  const lastLocalPushAtRef = useRef(0);
+  const lastRealtimeToastAtRef = useRef(0);
 
   useEffect(() => {
     if (requestedInviteCode && typeof sessionStorage !== "undefined") {
@@ -276,8 +284,15 @@ export function TenantProvider({
   // as the local period ends.
 
   const syncSpecificTenant = useCallback(
-    async (tenant: TenantSummary | null) => {
+    async (
+      tenant: TenantSummary | null,
+      options?: { realtimeActorName?: string },
+    ) => {
       if (!tenant || tenant.mode !== "cloud" || initialSession) return;
+      if (getLedgerEncryptionMode() !== "off" && !hasUnlockedLedgerKey()) {
+        // Wait until local AES-GCM vault is unlocked before reading/pushing state
+        return;
+      }
       if (typeof navigator !== "undefined" && navigator.onLine === false) {
         setSyncStatus("offline");
         return;
@@ -288,11 +303,28 @@ export function TenantProvider({
       try {
         const currentData = pickFinanceData(useFinance.getState());
         const res = await syncTenantWithSupabase(tenant.id, currentData, localStorage);
+        if (res.pushedCount > 0) {
+          lastLocalPushAtRef.current = Date.now();
+        }
         await flushPendingReceiptSync(tenant.id);
         applySyncedTenantData(tenant.id, res.mergedData);
         setPendingOpsCount(res.remainingOutboxCount);
         setLastSyncedAt(Date.now());
         setSyncStatus("idle");
+        if (
+          options?.realtimeActorName !== undefined &&
+          res.pulledCount > 0 &&
+          Date.now() - lastRealtimeToastAtRef.current > 6000
+        ) {
+          lastRealtimeToastAtRef.current = Date.now();
+          const actor = options.realtimeActorName.trim();
+          toast(
+            actor
+              ? `تحديث فوري في الخلفية من ${actor}`
+              : "تمت مزامنة تحديثات جديدة للمساحة في الخلفية",
+            { id: "mizan-realtime-merge", duration: 2500 },
+          );
+        }
         if (res.rejected.length > 0) {
           setRejectedSyncItems((prev) => [...res.rejected, ...prev].slice(0, 20));
           toast.error(`تم رفض ${res.rejected.length} عملية أثناء المزامنة بسبب الصلاحية أو حالة الاشتراك`);
@@ -366,6 +398,91 @@ export function TenantProvider({
       void syncSpecificTenant(activeTenant);
     }
   }, [authStatus, activeTenantKey, activeTenantMode, isOnline, initialSession, activeTenant, syncSpecificTenant, subscriptionBlockReason]);
+
+  // Non-intrusive Supabase Realtime live workspace sync (merges quietly in background without disrupting open forms)
+  useEffect(() => {
+    if (
+      authStatus !== "authenticated" ||
+      !activeTenant ||
+      activeTenant.mode !== "cloud" ||
+      !isOnline ||
+      initialSession
+    ) {
+      setRealtimeConnected(false);
+      return;
+    }
+
+    const sb = getSupabaseClient();
+    let debounceTimer: number | null = null;
+    const tenantSnapshot = activeTenant;
+    const currentUserId = user?.id ?? "";
+
+    const channel = sb
+      .channel(`mizan-ws-${tenantSnapshot.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "tenant_records",
+          filter: `tenant_id=eq.${tenantSnapshot.id}`,
+        },
+        (payload) => {
+          const newRec = (payload.new ?? {}) as Record<string, unknown>;
+          const updatedBy = typeof newRec.updated_by === "string" ? newRec.updated_by : "";
+          const updatedByName =
+            typeof newRec.updated_by_name === "string" ? newRec.updated_by_name : "";
+          // Ignore immediate echo of our own device's push
+          if (
+            updatedBy &&
+            updatedBy === currentUserId &&
+            Date.now() - lastLocalPushAtRef.current < 3500
+          ) {
+            return;
+          }
+          if (typeof window !== "undefined") {
+            if (debounceTimer) window.clearTimeout(debounceTimer);
+            debounceTimer = window.setTimeout(() => {
+              void syncSpecificTenant(tenantSnapshot, {
+                realtimeActorName: updatedBy === currentUserId ? "" : updatedByName,
+              });
+            }, 450);
+          }
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "tenants",
+          filter: `id=eq.${tenantSnapshot.id}`,
+        },
+        () => {
+          // Reflect owner subscription approval / plan extension immediately
+          if (user) {
+            void fetchMyWorkspaceBundle(user)
+              .then((bundle) => {
+                const localOnly =
+                  typeof localStorage !== "undefined" ? loadLocalWorkspaces(user.id, localStorage) : [];
+                setWorkspaces([...bundle.workspaces, ...localOnly]);
+              })
+              .catch(() => undefined);
+          }
+        },
+      )
+      .subscribe((status) => {
+        setRealtimeConnected(status === "SUBSCRIBED");
+      });
+
+    return () => {
+      if (debounceTimer && typeof window !== "undefined") {
+        window.clearTimeout(debounceTimer);
+      }
+      setRealtimeConnected(false);
+      void sb.removeChannel(channel);
+    };
+  }, [authStatus, activeTenant, isOnline, initialSession, user, syncSpecificTenant]);
 
   const hydrateAuthenticatedUser = useCallback(
     async (authUser: TenantUser) => {
@@ -894,6 +1011,7 @@ export function TenantProvider({
       subscriptionBlockReason,
       canWrite,
       isOnline,
+      realtimeConnected,
       syncStatus,
       pendingOpsCount,
       rejectedSyncItems,
@@ -930,6 +1048,7 @@ export function TenantProvider({
       subscriptionBlockReason,
       canWrite,
       isOnline,
+      realtimeConnected,
       syncStatus,
       pendingOpsCount,
       rejectedSyncItems,
