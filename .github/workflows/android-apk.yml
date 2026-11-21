@@ -165,7 +165,6 @@ jobs:
           fi
 
       - name: Publish APK blob checksum status for sandbox retrieval
-        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

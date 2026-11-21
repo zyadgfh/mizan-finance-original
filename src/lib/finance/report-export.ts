@@ -457,11 +457,15 @@ export async function shareMonthlyReportImage(
   ).MizanNative;
 
   if (nativeBridge?.shareBinaryFile) {
-    const buffer = await blob.arrayBuffer();
-    let binary = "";
-    const bytes = new Uint8Array(buffer);
-    for (const b of bytes) binary += String.fromCharCode(b);
-    if (nativeBridge.shareBinaryFile(filename, "image/png", btoa(binary))) return;
+    try {
+      const buffer = await blob.arrayBuffer();
+      let binary = "";
+      const bytes = new Uint8Array(buffer);
+      for (const b of bytes) binary += String.fromCharCode(b);
+      if (nativeBridge.shareBinaryFile(filename, "image/png", btoa(binary))) return;
+    } catch {
+      // Fall back to navigator.share / anchor download
+    }
   }
 
   if (typeof navigator !== "undefined" && typeof navigator.share === "function" && typeof navigator.canShare === "function") {

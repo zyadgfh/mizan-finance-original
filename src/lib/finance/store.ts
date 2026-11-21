@@ -1234,7 +1234,12 @@ export function downloadExportBlob(blob: Blob, filename: string) {
 
   if (nativeBridge?.shareFile && !blob.type.startsWith("image/")) {
     void blob.text().then((content) => {
-      const ok = nativeBridge.shareFile?.(filename, blob.type || "application/octet-stream", content);
+      let ok = false;
+      try {
+        ok = Boolean(nativeBridge.shareFile?.(filename, blob.type || "application/octet-stream", content));
+      } catch {
+        ok = false;
+      }
       if (ok) return;
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
